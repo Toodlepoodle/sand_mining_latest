@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Earth Engine utilities for Sand Mining Detection Tool.
+Earth Engine utilities for Sand Mining Detection Tool - Simplified without historical imagery.
 """
 
 import ee
@@ -118,35 +118,6 @@ def enhance_image(img):
     except Exception as e:
         print(f"  Warning: Error during image enhancement: {e}. Returning original image.")
         return img  # Return original if enhancement fails
-
-def get_date_ranges(years_back=5, interval_months=12):
-    """
-    Generate a list of date ranges going back X years at specified intervals.
-    
-    Args:
-        years_back (int): Number of years to look back
-        interval_months (int): Interval between date ranges in months
-        
-    Returns:
-        list: List of (start_date, end_date) tuples as EE Date objects
-    """
-    now = datetime.datetime.now()
-    
-    date_ranges = []
-    for year in range(years_back):
-        for month in range(0, 12, interval_months):
-            # Start date is X years and Y months ago
-            start_dt = now - datetime.timedelta(days=365*year + 30*month + 15)
-            # End date is 1 month after start date (or whatever interval is more appropriate)
-            end_dt = start_dt + datetime.timedelta(days=30)
-            
-            # Convert to EE Date objects
-            start_ee = ee.Date(start_dt)
-            end_ee = ee.Date(end_dt)
-            
-            date_ranges.append((start_ee, end_ee))
-    
-    return date_ranges
 
 def get_spectral_indices(image, bands_dict=None):
     """
@@ -516,368 +487,6 @@ def download_training_image(lat, lon, i, folder, buffer_m=1500, img_dim=512):
         print(f"  Unexpected Error for point {i+1} ({lat:.4f}, {lon:.4f}): {type(e).__name__} - {e}")
         return False
 
-def get_historical_images(lat, lon, buffer_m=1500, years_back=5, interval_months=6):
-    """
-    Retrieve historical satellite images for a specific location.
-    
-    Args:
-        lat (float): Latitude
-        lon (float): Longitude
-        buffer_m (int): Buffer around point in meters
-        years_back (int): Number of years to look back
-        interval_months (int): Interval between images in months
-        
-    Returns:
-        dict: Dictionary with dates as keys and image information as values
-    """
-    point = ee.Geometry.Point([lon, lat])
-    region = point.buffer(buffer_m)
-    
-    date_ranges = get_date_ranges(years_back, interval_months)
-    
-    historical_data = {}
-    
-    for i, (start_date, end_date) in enumerate(date_ranges):
-        print(f"Fetching data for timeframe {i+1}/{len(date_ranges)}")
-        
-        # Try Sentinel-2 first (highest resolution)
-        s2_image = get_best_s2_image(region, start_date, end_date)
-        
-        if s2_image:
-            try:
-                date_millis = s2_image.get('system:time_start').getInfo()
-                date_str = datetime.datetime.fromtimestamp(date_millis/1000).strftime('%Y-%m-%d')
-                
-                # Get available bands
-                available_bands = s2_image.bandNames().getInfo()
-                
-                # Use available bands directly instead of assuming specific names
-                # Create a mapping from standard names to actual band names
-                band_map = {}
-                
-                # Look for bands by pattern rather than exact names
-                for band in available_bands:
-                    band_lower = band.lower()
-                    # Look for bands by explicit name matching for Sentinel-2 (not pattern-based)
-                    if 'B2' in available_bands:
-                        band_map['Blue'] = 'B2'
-                    if 'B3' in available_bands:
-                        band_map['Green'] = 'B3'
-                    if 'B4' in available_bands:
-                        band_map['Red'] = 'B4'
-                    if 'B8' in available_bands:
-                        band_map['NIR'] = 'B8'
-                    if 'B11' in available_bands:
-                        band_map['SWIR1'] = 'B11'
-                    if 'B12' in available_bands:
-                        band_map['SWIR2'] = 'B12'
-                
-                # Calculate spectral indices
-                indices = {}
-                
-                # NDVI = (NIR - Red) / (NIR + Red)
-                if 'NIR' in band_map and 'Red' in band_map:
-                    try:
-                        ndvi_img = s2_image.normalizedDifference([band_map['NIR'], band_map['Red']])
-                        indices['NDVI'] = ndvi_img.reduceRegion(
-                            reducer=ee.Reducer.mean(),
-                            geometry=region,
-                            scale=10
-                        ).get('nd').getInfo()
-                    except Exception as e:
-                        print(f"Error calculating NDVI: {e}")
-                
-                # NDWI = (Green - NIR) / (Green + NIR)
-                if 'Green' in band_map and 'NIR' in band_map:
-                    try:
-                        ndwi_img = s2_image.normalizedDifference([band_map['Green'], band_map['NIR']])
-                        indices['NDWI'] = ndwi_img.reduceRegion(
-                            reducer=ee.Reducer.mean(),
-                            geometry=region,
-                            scale=10
-                        ).get('nd').getInfo()
-                    except Exception as e:
-                        print(f"Error calculating NDWI: {e}")
-                
-                # MNDWI = (Green - SWIR1) / (Green + SWIR1)
-                if 'Green' in band_map and 'SWIR1' in band_map:
-                    try:
-                        mndwi_img = s2_image.normalizedDifference([band_map['Green'], band_map['SWIR1']])
-                        indices['MNDWI'] = mndwi_img.reduceRegion(
-                            reducer=ee.Reducer.mean(),
-                            geometry=region,
-                            scale=10
-                        ).get('nd').getInfo()
-                    except Exception as e:
-                        print(f"Error calculating MNDWI: {e}")
-                
-                # NDBI = (SWIR1 - NIR) / (SWIR1 + NIR)
-                if 'SWIR1' in band_map and 'NIR' in band_map:
-                    try:
-                        ndbi_img = s2_image.normalizedDifference([band_map['SWIR1'], band_map['NIR']])
-                        indices['NDBI'] = ndbi_img.reduceRegion(
-                            reducer=ee.Reducer.mean(),
-                            geometry=region,
-                            scale=10
-                        ).get('nd').getInfo()
-                    except Exception as e:
-                        print(f"Error calculating NDBI: {e}")
-                
-                # BSI = ((SWIR1 + Red) - (NIR + Blue)) / ((SWIR1 + Red) + (NIR + Blue))
-                if all(k in band_map for k in ['SWIR1', 'Red', 'NIR', 'Blue']):
-                    try:
-                        numerator = s2_image.select(band_map['SWIR1']).add(s2_image.select(band_map['Red'])).subtract(
-                            s2_image.select(band_map['NIR']).add(s2_image.select(band_map['Blue']))
-                        )
-                        denominator = s2_image.select(band_map['SWIR1']).add(s2_image.select(band_map['Red'])).add(
-                            s2_image.select(band_map['NIR']).add(s2_image.select(band_map['Blue']))
-                        )
-                        bsi_img = numerator.divide(denominator)
-                        indices['BSI'] = bsi_img.reduceRegion(
-                            reducer=ee.Reducer.mean(),
-                            geometry=region,
-                            scale=10
-                        ).get(band_map['SWIR1']).getInfo()
-                    except Exception as e:
-                        print(f"Error calculating BSI: {e}")
-                
-                historical_data[date_str] = {
-                    'source': 'Sentinel-2',
-                    'cloud_cover': s2_image.get('CLOUDY_PIXEL_PERCENTAGE').getInfo(),
-                    'image': s2_image,
-                    'bands': available_bands,
-                    'band_map': band_map,
-                    **indices  # Add all calculated indices
-                }
-                continue  # Skip to next date range if Sentinel-2 found
-            except Exception as e:
-                print(f"Error retrieving Sentinel-2 metadata: {e}")
-        
-        # Try Landsat if Sentinel-2 not available
-        landsat_image, collection_id = get_best_landsat_image(region, start_date, end_date)
-        
-        if landsat_image:
-            try:
-                date_millis = landsat_image.get('system:time_start').getInfo()
-                date_str = datetime.datetime.fromtimestamp(date_millis/1000).strftime('%Y-%m-%d')
-                
-                # Get available bands
-                available_bands = landsat_image.bandNames().getInfo()
-                
-                # Create band mapping
-                band_map = {}
-                for band in available_bands:
-                    band_lower = band.lower()
-                    if 'blue' in band_lower:
-                        band_map['Blue'] = band
-                    elif 'green' in band_lower:
-                        band_map['Green'] = band
-                    elif 'red' in band_lower and 'edge' not in band_lower:
-                        band_map['Red'] = band
-                    elif 'nir' in band_lower:
-                        band_map['NIR'] = band
-                    elif 'swir1' in band_lower or ('swir' in band_lower and '1' in band):
-                        band_map['SWIR1'] = band
-                    elif 'swir2' in band_lower or ('swir' in band_lower and '2' in band):
-                        band_map['SWIR2'] = band
-                
-                # Calculate spectral indices
-                indices = {}
-                
-                # Calculate indices (same code as for Sentinel-2)
-                if 'NIR' in band_map and 'Red' in band_map:
-                    try:
-                        ndvi_img = landsat_image.normalizedDifference([band_map['NIR'], band_map['Red']])
-                        indices['NDVI'] = ndvi_img.reduceRegion(
-                            reducer=ee.Reducer.mean(),
-                            geometry=region,
-                            scale=30
-                        ).get('nd').getInfo()
-                    except Exception as e:
-                        print(f"Error calculating NDVI: {e}")
-                
-                # Calculate other indices similarly
-                
-                historical_data[date_str] = {
-                    'source': 'Landsat 8-9' if collection_id == 'LANDSAT/LC09/C02/T1_L2' else 'Landsat 4-7',
-                    'cloud_cover': landsat_image.get('CLOUD_COVER').getInfo(),
-                    'image': landsat_image,
-                    'bands': available_bands,
-                    'band_map': band_map,
-                    **indices
-                }
-                continue  # Skip to next date range if Landsat found
-            except Exception as e:
-                print(f"Error retrieving Landsat metadata: {e}")
-        
-        # Try VIIRS as last resort (lower resolution)
-        viirs_image = get_best_viirs_image(region, start_date, end_date)
-        
-        if viirs_image:
-            try:
-                date_millis = viirs_image.get('system:time_start').getInfo()
-                date_str = datetime.datetime.fromtimestamp(date_millis/1000).strftime('%Y-%m-%d')
-                
-                # Get available bands
-                available_bands = viirs_image.bandNames().getInfo()
-                
-                # Create band mapping (same approach)
-                band_map = {}
-                for band in available_bands:
-                    band_lower = band.lower()
-                    # Map VIIRS bands to standard names
-                    # (similar pattern as before)
-                
-                # Calculate indices where possible
-                indices = {}
-                # (same calculation code as above)
-                
-                historical_data[date_str] = {
-                    'source': 'VIIRS',
-                    'cloud_cover': 'N/A',  # VIIRS doesn't have cloud cover metadata
-                    'image': viirs_image,
-                    'bands': available_bands,
-                    'band_map': band_map,
-                    **indices
-                }
-            except Exception as e:
-                print(f"Error retrieving VIIRS metadata: {e}")
-        
-        # Add a small sleep to avoid hitting EE rate limits
-        time.sleep(0.5)
-    
-    print(f"Retrieved {len(historical_data)} historical images for point ({lat}, {lon})")
-    return historical_data
-        
-
-def extract_historical_band_stats(historical_data, lat, lon, buffer_m=1500):
-    """
-    Extract statistics from historical satellite images for a specific location.
-    
-    Args:
-        historical_data (dict): Dictionary of historical image data
-        lat (float): Latitude
-        lon (float): Longitude
-        buffer_m (int): Buffer around point in meters
-        
-    Returns:
-        pd.DataFrame: DataFrame with band statistics for each date
-    """
-    point = ee.Geometry.Point([lon, lat])
-    region = point.buffer(buffer_m)
-    
-    all_stats = []
-    
-    for date_str, data in tqdm(historical_data.items(), desc="Extracting band statistics"):
-        try:
-            image = data['image']
-            source = data['source']
-            
-            # Create a dictionary to map standard band names to image-specific band names
-            if 'band_map' in data:
-                bands_dict = data['band_map']  # Use the existing band mapping
-            elif 'band_names' in data and 'bands' in data:
-                bands_dict = dict(zip(data['band_names'], data['bands']))
-            else:
-                # Try to create a band mapping from the image directly
-                try:
-                    image_bands = image.bandNames().getInfo()
-                    bands_dict = {}
-                    # Add explicit Sentinel-2 mapping
-                    if 'B2' in image_bands:
-                        bands_dict = {
-                            'Blue': 'B2',
-                            'Green': 'B3',
-                            'Red': 'B4',
-                            'NIR': 'B8',
-                            'SWIR1': 'B11',
-                            'SWIR2': 'B12'
-                        }
-                    # Add Landsat 8/9 mapping
-                    elif 'SR_B2' in image_bands:
-                        bands_dict = {
-                            'Blue': 'SR_B2',
-                            'Green': 'SR_B3',
-                            'Red': 'SR_B4',
-                            'NIR': 'SR_B5',
-                            'SWIR1': 'SR_B6',
-                            'SWIR2': 'SR_B7'
-                        }
-                    # Add Landsat 4-7 mapping
-                    elif 'SR_B1' in image_bands:
-                        bands_dict = {
-                            'Blue': 'SR_B1',
-                            'Green': 'SR_B2',
-                            'Red': 'SR_B3',
-                            'NIR': 'SR_B4',
-                            'SWIR1': 'SR_B5',
-                            'SWIR2': 'SR_B7'
-                        }
-                except Exception as band_err:
-                    print(f"Warning: Could not get bands for date {date_str}: {band_err}")
-                    bands_dict = {}  # Empty dict as fallback
-            
-            # Add spectral indices to the image
-            image_with_indices = get_spectral_indices(image, bands_dict)
-            
-            # Get statistics from the region
-            stats = image_with_indices.reduceRegion(
-                reducer=ee.Reducer.mean().combine(
-                    ee.Reducer.stdDev(), None, True
-                ).combine(
-                    ee.Reducer.minMax(), None, True
-                ),
-                geometry=region,
-                scale=10 if source == 'Sentinel-2' else (30 if 'Landsat' in source else 500),
-                maxPixels=1e9
-            ).getInfo()
-            
-            # Create a record for this date
-            record = {
-                'date': date_str,
-                'source': source
-            }
-            
-            # Add band statistics to the record
-            if 'bands' in data:
-                for band_name in data['bands']:
-                    if f"{band_name}_mean" in stats:
-                        record[f"{band_name}_mean"] = stats[f"{band_name}_mean"]
-                        record[f"{band_name}_stdDev"] = stats[f"{band_name}_stdDev"]
-                        record[f"{band_name}_min"] = stats[f"{band_name}_min"]
-                        record[f"{band_name}_max"] = stats[f"{band_name}_max"]
-            else:
-                # If 'bands' is missing, try to use the bands from bands_dict
-                for std_name, band_name in bands_dict.items():
-                    if f"{band_name}_mean" in stats:
-                        record[f"{std_name}_mean"] = stats[f"{band_name}_mean"]
-                        record[f"{std_name}_stdDev"] = stats[f"{band_name}_stdDev"]
-                        record[f"{std_name}_min"] = stats[f"{band_name}_min"]
-                        record[f"{std_name}_max"] = stats[f"{band_name}_max"]
-            
-            # Add spectral indices to the record
-            for index_name in ['NDVI', 'NDWI', 'MNDWI', 'BSI', 'NDBI', 'NDTI']:
-                if f"{index_name}_mean" in stats:
-                    record[f"{index_name}_mean"] = stats[f"{index_name}_mean"]
-                    record[f"{index_name}_stdDev"] = stats[f"{index_name}_stdDev"]
-                    record[f"{index_name}_min"] = stats[f"{index_name}_min"]
-                    record[f"{index_name}_max"] = stats[f"{index_name}_max"]
-            
-            all_stats.append(record)
-            
-        except Exception as e:
-            print(f"Error extracting statistics for date {date_str}: {e}")
-            continue
-    
-    # Create DataFrame from all records
-    if all_stats:
-        df = pd.DataFrame(all_stats)
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date')
-        return df
-    else:
-        return pd.DataFrame()  # Return empty DataFrame if no stats were extracted
-
 def download_training_images(coordinates, output_folder, img_dim=512, buffer_m=1500):
     """
     Download Sentinel-2 images for the specified coordinates.
@@ -920,119 +529,6 @@ def download_training_images(coordinates, output_folder, img_dim=512, buffer_m=1
 
     print(f"\nSuccessfully downloaded {success_count} out of {len(coordinates)} images.")
     return success_count > 0  # Return True if any images were successfully downloaded
-
-def calculate_temporal_features(historical_stats_df):
-    """
-    Calculate temporal features from a historical statistics DataFrame.
-    
-    Args:
-        historical_stats_df (pd.DataFrame): DataFrame with historical band statistics
-        
-    Returns:
-        dict: Dictionary of temporal features
-    """
-    if historical_stats_df.empty or len(historical_stats_df) < 2:
-        return {}  # Need at least 2 time points for trends
-    
-    temporal_features = {}
-    
-    # Sort by date to ensure correct temporal order
-    df = historical_stats_df.sort_values('date')
-    
-    # Calculate trends for key indices
-    for index in ['NDVI', 'NDWI', 'MNDWI', 'BSI', 'NDBI']:
-        col_name = f"{index}_mean"
-        if col_name in df.columns:
-            # Convert dates to ordinal values for regression
-            date_ordinals = np.array([(d - df['date'].min()).days for d in df['date']])
-            values = df[col_name].values
-            
-            # Skip if we have too many NaN values
-            valid_mask = ~np.isnan(values)
-            if np.sum(valid_mask) < 2:
-                continue
-                
-            # Linear regression to get slope (trend)
-            try:
-                from scipy import stats as scipy_stats
-                slope, intercept, r_value, p_value, std_err = scipy_stats.linregress(
-                    date_ordinals[valid_mask], values[valid_mask]
-                )
-                temporal_features[f"{index}_trend"] = slope
-                temporal_features[f"{index}_trend_r_squared"] = r_value**2
-                temporal_features[f"{index}_trend_p_value"] = p_value
-            except Exception as e:
-                print(f"Error calculating trend for {index}: {e}")
-    
-    # Calculate variability metrics
-    for index in ['NDVI', 'NDWI', 'MNDWI', 'BSI', 'NDBI']:
-        col_name = f"{index}_mean"
-        if col_name in df.columns:
-            values = df[col_name].dropna().values
-            if len(values) >= 2:
-                temporal_features[f"{index}_variability"] = np.std(values)
-                temporal_features[f"{index}_range"] = np.max(values) - np.min(values)
-    
-    # Calculate seasonal metrics if we have enough data points
-    if len(df) >= 6:
-        # Look for seasonality in NDVI (applicable for natural vegetation)
-        if 'NDVI_mean' in df.columns:
-            try:
-                # Simple approach: compare variability in different quarters/seasons
-                df['quarter'] = df['date'].dt.quarter
-                seasonal_stats = df.groupby('quarter')['NDVI_mean'].agg(['mean', 'std'])
-                
-                if not seasonal_stats.empty and not seasonal_stats['mean'].isna().all():
-                    # Calculate seasonal variation
-                    temporal_features['NDVI_seasonal_variation'] = seasonal_stats['mean'].max() - seasonal_stats['mean'].min()
-                    # Calculate consistency of seasonality
-                    temporal_features['NDVI_seasonal_consistency'] = seasonal_stats['std'].mean()
-            except Exception as e:
-                print(f"Error calculating seasonal metrics: {e}")
-    
-    # Calculate change detection metrics
-    # First and last observation changes
-    if len(df) >= 2:
-        for index in ['NDVI', 'NDWI', 'MNDWI', 'BSI', 'NDBI']:
-            col_name = f"{index}_mean"
-            if col_name in df.columns:
-                first_valid = df[col_name].first_valid_index()
-                last_valid = df[col_name].last_valid_index()
-                
-                if first_valid is not None and last_valid is not None and first_valid != last_valid:
-                    first_value = df.loc[first_valid, col_name]
-                    last_value = df.loc[last_valid, col_name]
-                    
-                    if not np.isnan(first_value) and not np.isnan(last_value):
-                        # Total change
-                        temporal_features[f"{index}_total_change"] = last_value - first_value
-                        # Percent change
-                        if first_value != 0:
-                            temporal_features[f"{index}_percent_change"] = (last_value - first_value) / abs(first_value) * 100
-    
-    # Calculate rapid change metrics - detect sudden changes that might indicate sand mining
-    if len(df) >= 3:
-        for index in ['NDVI', 'NDWI', 'MNDWI', 'BSI']:
-            col_name = f"{index}_mean"
-            if col_name in df.columns:
-                # Get the differences between consecutive observations
-                differences = df[col_name].diff().dropna().values
-                
-                if len(differences) > 0:
-                    # Maximum rate of change (positive or negative)
-                    temporal_features[f"{index}_max_change_rate"] = np.max(np.abs(differences))
-                    
-                    # Check for sudden drops (potentially indicating disturbances)
-                    if index in ['NDVI', 'NDWI']:  # These typically decrease with disturbance
-                        sudden_drops = np.where(differences < -0.1)[0]  # Threshold can be adjusted
-                        temporal_features[f"{index}_sudden_drops"] = len(sudden_drops)
-                    
-                    # Check for sudden increases (potentially indicating disturbances)
-                    if index in ['BSI', 'NDBI']:  # These typically increase with disturbance
-                        sudden_increases = np.where(differences > 0.1)[0]  # Threshold can be adjusted
-                        temporal_features[f"{index}_sudden_increases"] = len(sudden_increases)
-    
-    return temporal_features
 
 def get_latest_imagery_date(region):
     """
@@ -1125,10 +621,10 @@ def get_latest_imagery_date(region):
         print(f"Error determining latest imagery date: {type(e).__name__} - {e}")
         return datetime.datetime.now().strftime('%Y-%m-%d'), "Error - General Exception"
 
-def analyze_point(lat, lon, latest_date_str, model, scaler, feature_extractor, use_historical=True, 
-                 years_back=5, img_dim=800, buffer_m=1500, temp_folder='temp'):
+def analyze_point(lat, lon, latest_date_str, model, scaler, feature_extractor, 
+                 img_dim=800, buffer_m=1500, temp_folder='temp'):
     """
-    Download image, extract features, and predict probability for a single point.
+    Download image, extract enhanced features (including from highlighted areas), and predict probability.
     
     Args:
         lat (float): Latitude
@@ -1136,9 +632,7 @@ def analyze_point(lat, lon, latest_date_str, model, scaler, feature_extractor, u
         latest_date_str (str): Latest date for imagery search
         model: Trained model
         scaler: Feature scaler
-        feature_extractor: Function to extract features from an image
-        use_historical (bool): Whether to use historical features
-        years_back (int): Number of years to look back for historical data
+        feature_extractor: Function to extract enhanced features from an image
         img_dim (int): Image dimension
         buffer_m (int): Buffer around point in meters
         temp_folder (str): Temporary folder path
@@ -1191,165 +685,267 @@ def analyze_point(lat, lon, latest_date_str, model, scaler, feature_extractor, u
         
         # If still no S2 image, try Landsat
         if image_to_use is None:
-            landsat_image, _ = get_best_landsat_image(region, start_date_ee_broad, end_date_ee, max_cloud_cover=60)
-            
+            landsat_image, landsat_collection = get_best_landsat_image(
+                region, start_date_ee_broad, end_date_ee, max_cloud_cover=50
+            )
             if landsat_image is not None:
                 image_to_use = landsat_image
-                # Adjust visualization parameters for Landsat
+                # Update visualization parameters for Landsat
                 vis_params = {
                     'bands': ['SR_B4', 'SR_B3', 'SR_B2'],  # RGB for Landsat
-                    'min': 0,
-                    'max': 3000,
+                    'min': 7000,
+                    'max': 12000,
                     'gamma': 1.4
                 }
             else:
-                return None  # Skip this point if no image available
+                return {
+                    'probability': 0.0,
+                    'error': 'No suitable satellite imagery found',
+                    'lat': lat,
+                    'lon': lon,
+                    'image_date': 'N/A',
+                    'cloud_cover': 'N/A'
+                }
         else:
-            # Default visualization for Sentinel-2
+            # Use Sentinel-2 visualization parameters
             vis_params = {
-                'bands': ['B4', 'B3', 'B2'],  # RGB
+                'bands': ['B4', 'B3', 'B2'],  # RGB for Sentinel-2
                 'min': 0,
                 'max': 3000,
                 'gamma': 1.4
             }
         
-        # Get image date
+        # Get image metadata
         try:
-            actual_img_date_millis = image_to_use.get('system:time_start').getInfo()
-            actual_img_date = datetime.datetime.fromtimestamp(actual_img_date_millis/1000).strftime('%Y-%m-%d')
-        except ee.EEException as date_err:
-            print(f"Warning: Could not get image date: {date_err}")
-            actual_img_date = "Unknown"  # Fallback date
+            image_date_millis = image_to_use.get('system:time_start').getInfo()
+            image_date = datetime.datetime.fromtimestamp(image_date_millis/1000).strftime('%Y-%m-%d')
+            
+            # Try to get cloud cover (different property names for different sensors)
+            cloud_cover = None
+            try:
+                cloud_cover = image_to_use.get('CLOUDY_PIXEL_PERCENTAGE').getInfo()  # Sentinel-2
+            except:
+                try:
+                    cloud_cover = image_to_use.get('CLOUD_COVER').getInfo()  # Landsat
+                except:
+                    cloud_cover = 'Unknown'
+        except Exception as meta_err:
+            print(f"Warning: Error getting image metadata: {meta_err}")
+            image_date = 'Unknown'
+            cloud_cover = 'Unknown'
         
-        # Get download URL
-        try:
-            region_info = region.getInfo()
-            if not region_info or 'coordinates' not in region_info:
-                return None
-            region_coords = region_info['coordinates']
-        except ee.EEException as region_err:
-            print(f"Warning: Error getting region info ({lat:.4f}, {lon:.4f}): {region_err}")
-            return None
+        # Ensure temp folder exists
+        os.makedirs(temp_folder, exist_ok=True)
         
-        download_url = image_to_use.getThumbURL({
-            **vis_params,
-            'region': region_coords,
-            'dimensions': img_dim,
-            'format': 'png'
-        })
+        # Create temporary file
+        temp_file = os.path.join(temp_folder, f'temp_analysis_{lat:.6f}_{lon:.6f}.png')
         
         # Download image
-        response = requests.get(download_url, timeout=90)  # Extended timeout
-        response.raise_for_status()
-        img = Image.open(io.BytesIO(response.content)).convert('RGB')
-        
-        # Save temporarily for feature extraction
-        os.makedirs(temp_folder, exist_ok=True)
-        temp_filename = f'map_temp_{lat:.6f}_{lon:.6f}.png'
-        temp_file = os.path.join(temp_folder, temp_filename)
-        img.save(temp_file)
-        
-        # Extract features from current image
-        image_features = feature_extractor(temp_file)
-        
-        if not image_features:
-            return None
-        
-        # Add historical features if enabled
-        historical_features = {}
-        if use_historical and years_back > 0:
-            # Get historical data
-            historical_data = get_historical_images(lat, lon, buffer_m=buffer_m, years_back=years_back)
+        try:
+            region_coords = region.getInfo()['coordinates']
+            download_url = image_to_use.getThumbURL({
+                **vis_params,
+                'region': region_coords,
+                'dimensions': img_dim,
+                'format': 'png'
+            })
             
-            if historical_data:
-                # Extract statistics from historical data
-                historical_stats = extract_historical_band_stats(historical_data, lat, lon, buffer_m=buffer_m)
-                
-                if not historical_stats.empty:
-                    # Calculate temporal features
-                    historical_features = calculate_temporal_features(historical_stats)
-        
-        # Combine features
-        all_features = {**image_features, **historical_features}
-        
-        # Convert to vector for prediction
-        feature_vector = []
-        
-        if hasattr(model, 'feature_names_in_'):
-            # Use model's feature names if available (scikit-learn 1.0+)
-            for feature_name in model.feature_names_in_:
-                if feature_name in all_features:
-                    feature_vector.append(all_features[feature_name])
-                else:
-                    feature_vector.append(0)  # Use 0 for missing features
-        else:
-            # Fall back to all features in arbitrary order
-            feature_vector = list(all_features.values())
-        
-        # Convert to numpy array
-        X = np.array([feature_vector])
-        
-        # Scale features
-        X_scaled = scaler.transform(X)
-        
-        # Predict probability
-        probability = model.predict_proba(X_scaled)[0][1]
-        
-        # Determine classification
-        if probability >= 0.7:
-            classification = 'Sand Mining Likely'
-        elif probability >= 0.5:
-            classification = 'Possible Sand Mining'
-        else:
-            classification = 'No Sand Mining Likely'
-        
-        # Get feature importance for explanation if model supports it
-        top_features = []
-        if hasattr(model, 'feature_importances_') and hasattr(model, 'feature_names_in_'):
-            importances = model.feature_importances_
-            feature_names = model.feature_names_in_
+            response = requests.get(download_url, timeout=90)
+            response.raise_for_status()
             
-            # Sort features by importance
-            indices = np.argsort(importances)[::-1]
+            # Process image
+            img = Image.open(io.BytesIO(response.content)).convert('RGB')
+            img_enhanced = enhance_image(img)
+            img_enhanced.save(temp_file, format='PNG', optimize=True, quality=95)
             
-            # Get top 3 features that are present in this point
-            for i in indices:
-                feature_name = feature_names[i]
-                if feature_name in all_features and len(top_features) < 3:
-                    top_features.append((feature_name, importances[i]))
+        except Exception as download_err:
+            return {
+                'probability': 0.0,
+                'error': f'Image download failed: {download_err}',
+                'lat': lat,
+                'lon': lon,
+                'image_date': image_date,
+                'cloud_cover': cloud_cover
+            }
         
-        # Build result
-        result = {
-            'latitude': lat,
-            'longitude': lon,
-            'probability': probability,
-            'classification': classification,
-            'image_date': actual_img_date
-        }
-        
-        # Add top features info if available
-        if top_features:
-            result['top_features'] = ', '.join([f"{name} ({imp:.3f})" for name, imp in top_features])
-        
-        return result
+        # Extract features using the provided feature extractor
+        try:
+            features = feature_extractor(temp_file)
+            if features is None or len(features) == 0:
+                return {
+                    'probability': 0.0,
+                    'error': 'Feature extraction failed',
+                    'lat': lat,
+                    'lon': lon,
+                    'image_date': image_date,
+                    'cloud_cover': cloud_cover
+                }
+            
+            # Convert features dict to list if needed
+            if isinstance(features, dict):
+                feature_values = list(features.values())
+            else:
+                feature_values = features
+            
+            # Scale features
+            features_scaled = scaler.transform([feature_values])
+            
+            # Predict probability
+            probability = model.predict_proba(features_scaled)[0][1]  # Probability of positive class
+            
+            return {
+                'probability': float(probability),
+                'error': None,
+                'latitude': lat,  # Changed from 'lat' to 'latitude' for consistency
+                'longitude': lon,  # Changed from 'lon' to 'longitude' for consistency
+                'image_date': image_date,
+                'cloud_cover': cloud_cover,
+                'features_count': len(feature_values)
+            }
+            
+        except Exception as prediction_err:
+            return {
+                'probability': 0.0,
+                'error': f'Prediction failed: {prediction_err}',
+                'latitude': lat,
+                'longitude': lon,
+                'image_date': image_date,
+                'cloud_cover': cloud_cover
+            }
     
     except ee.EEException as ee_err:
-        ee_err_str = str(ee_err).lower()
-        # Implement backoff for common errors
-        if any(term in ee_err_str for term in ['quota', 'rate limit', 'user memory limit', 'computation timed out', 'backend error', 'too many requests']):
-            wait_time = min(64, 2**(np.random.randint(1, 7)))  # Random backoff 2-64s
-            time.sleep(wait_time)
-        return None
-    except requests.exceptions.RequestException:
-        time.sleep(1)  # Shorter wait after download errors
-        return None
-    except Exception as e:
-        print(f"Unexpected error analyzing point ({lat:.4f}, {lon:.4f}): {type(e).__name__} - {e}")
-        return None
+        return {
+            'probability': 0.0,
+            'error': f'Earth Engine error: {ee_err}',
+            'latitude': lat,
+            'longitude': lon,
+            'image_date': 'N/A',
+            'cloud_cover': 'N/A'
+        }
+    
+    except Exception as general_err:
+        return {
+            'probability': 0.0,
+            'error': f'General error: {general_err}',
+            'latitude': lat,
+            'longitude': lon,
+            'image_date': 'N/A',
+            'cloud_cover': 'N/A'
+        }
+    
     finally:
         # Clean up temporary file
         if temp_file and os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
-            except Exception:
-                pass  # Ignore errors removing temp file
+            except Exception as cleanup_err:
+                print(f"Warning: Could not delete temporary file {temp_file}: {cleanup_err}")
+
+def batch_analyze_points(coordinates_list, latest_date_str, model, scaler, 
+                        feature_extractor, img_dim=800, buffer_m=1500, 
+                        temp_folder='temp', max_workers=3):
+    """
+    Analyze multiple points in batch with progress tracking.
+    
+    Args:
+        coordinates_list (list): List of (lat, lon) tuples
+        latest_date_str (str): Latest date for imagery search
+        model: Trained model
+        scaler: Feature scaler
+        feature_extractor: Function to extract features from images
+        img_dim (int): Image dimension
+        buffer_m (int): Buffer around points in meters
+        temp_folder (str): Temporary folder path
+        max_workers (int): Maximum number of concurrent workers
+        
+    Returns:
+        list: List of result dictionaries
+    """
+    results = []
+    
+    print(f"\nAnalyzing {len(coordinates_list)} points...")
+    print(f"Image dimensions: {img_dim}x{img_dim}, Buffer: {buffer_m}m")
+    
+    with tqdm(total=len(coordinates_list), desc="Analyzing Points", unit="point") as pbar:
+        for lat, lon in coordinates_list:
+            try:
+                result = analyze_point(
+                    lat, lon, latest_date_str, model, scaler, feature_extractor,
+                    img_dim, buffer_m, temp_folder
+                )
+                results.append(result)
+                
+                # Add small delay to avoid overwhelming the API
+                time.sleep(0.5)
+                
+            except Exception as e:
+                error_result = {
+                    'probability': 0.0,
+                    'error': f'Analysis failed: {e}',
+                    'latitude': lat,
+                    'longitude': lon,
+                    'image_date': 'N/A',
+                    'cloud_cover': 'N/A'
+                }
+                results.append(error_result)
+            
+            pbar.update(1)
+    
+    return results
+
+def cleanup_temp_files(temp_folder='temp'):
+    """
+    Clean up temporary files created during analysis.
+    
+    Args:
+        temp_folder (str): Temporary folder path
+    """
+    try:
+        if os.path.exists(temp_folder):
+            for filename in os.listdir(temp_folder):
+                if filename.startswith('temp_analysis_') and filename.endswith('.png'):
+                    file_path = os.path.join(temp_folder, filename)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        print(f"Warning: Could not delete {file_path}: {e}")
+            
+            # Remove temp folder if empty
+            try:
+                os.rmdir(temp_folder)
+            except OSError:
+                pass  # Folder not empty or doesn't exist
+                
+    except Exception as e:
+        print(f"Warning: Error during cleanup: {e}")
+
+def validate_coordinates(coordinates_list):
+    """
+    Validate a list of coordinates.
+    
+    Args:
+        coordinates_list (list): List of (lat, lon) tuples
+        
+    Returns:
+        tuple: (valid_coords, invalid_coords)
+    """
+    valid_coords = []
+    invalid_coords = []
+    
+    for coord in coordinates_list:
+        try:
+            lat, lon = coord
+            lat, lon = float(lat), float(lon)
+            
+            # Check if coordinates are within valid ranges
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                valid_coords.append((lat, lon))
+            else:
+                invalid_coords.append((lat, lon, "Out of valid range"))
+                
+        except (ValueError, TypeError):
+            invalid_coords.append((coord, "Invalid format"))
+        except Exception as e:
+            invalid_coords.append((coord, f"Error: {e}"))
+    
+    return valid_coords, invalid_coords

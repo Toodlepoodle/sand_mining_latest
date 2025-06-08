@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Configuration settings for the Sand Mining Detection Tool.
+Configuration settings for the Enhanced Sand Mining Detection Tool with Area Highlighting.
 """
 
 import os
@@ -19,6 +19,7 @@ PROCESSED_DATA_DIR = os.path.join(DATA_DIR, 'processed')
 TRAINING_IMAGES_DIR = os.path.join(OUTPUT_DIR, 'training_images')
 MODELS_DIR = os.path.join(OUTPUT_DIR, 'models')
 PROBABILITY_MAPS_DIR = os.path.join(OUTPUT_DIR, 'probability_maps')
+ANNOTATIONS_DIR = os.path.join(OUTPUT_DIR, 'annotations')  # NEW: For area annotations
 TEMP_DIR = os.path.join(OUTPUT_DIR, 'temp')
 
 # Default file paths
@@ -26,6 +27,7 @@ DEFAULT_MODEL_FILE = os.path.join(MODELS_DIR, 'sand_mining_model.joblib')
 DEFAULT_SCALER_FILE = os.path.join(MODELS_DIR, 'feature_scaler.joblib')
 DEFAULT_FEATURE_IMPORTANCE_FILE = os.path.join(MODELS_DIR, 'feature_importance.json')
 LABELS_FILE = os.path.join(OUTPUT_DIR, 'training_labels.csv')
+ANNOTATIONS_FILE = os.path.join(ANNOTATIONS_DIR, 'area_annotations.json')  # NEW: Area annotations
 
 # Earth Engine settings
 EE_HIGH_VOLUME_URL = 'https://earthengine-highvolume.googleapis.com'
@@ -34,12 +36,6 @@ EE_HIGH_VOLUME_URL = 'https://earthengine-highvolume.googleapis.com'
 DEFAULT_IMAGE_DIM = 512  # Dimension for downloaded training images
 DEFAULT_MAP_IMAGE_DIM = 800  # Dimension for images used in mapping
 DEFAULT_BUFFER_METERS = 1500  # Area around points for image download
-
-# Satellite data settings
-# Historical lookback duration for different sensors
-SENTINEL_LOOKBACK_YEARS = 5  # Sentinel-2 data from ~2015
-LANDSAT_LOOKBACK_YEARS = 40  # Landsat archive goes back to 1980s
-VIIRS_LOOKBACK_YEARS = 10  # VIIRS from ~2011
 
 # Bands and collections to use
 # Sentinel-2 Harmonized
@@ -84,9 +80,13 @@ N_ESTIMATORS = 100
 MIN_SAMPLES_LEAF = 2
 ENABLE_MULTIPLE_MODELS = True  # Whether to train multiple models by default
 
-# Historical imagery parameters
-HISTORICAL_YEARS_BACK = 5  # Number of years to look back for historical imagery
-HISTORICAL_INTERVAL_MONTHS = 6  # Frequency of historical imagery (smaller = more frequent)
+# Area annotation settings (NEW)
+ANNOTATION_COLORS = {
+    'sand_mining': (255, 0, 0, 128),      # Red with transparency
+    'no_mining': (0, 255, 0, 128),       # Green with transparency
+    'equipment': (0, 0, 255, 128),       # Blue with transparency
+    'water_disturbance': (255, 255, 0, 128)  # Yellow with transparency
+}
 
 # Model files for different algorithms
 RF_MODEL_FILE = os.path.join(MODELS_DIR, 'random_forest_model.pkl')
@@ -102,6 +102,7 @@ MODEL_VIZ_DIR = os.path.join(MODELS_DIR, 'visualizations')
 # Create directory structure
 for directory in [
     DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR,
-    OUTPUT_DIR, TRAINING_IMAGES_DIR, MODELS_DIR, PROBABILITY_MAPS_DIR, TEMP_DIR, MODEL_VIZ_DIR
+    OUTPUT_DIR, TRAINING_IMAGES_DIR, MODELS_DIR, PROBABILITY_MAPS_DIR, 
+    ANNOTATIONS_DIR, TEMP_DIR, MODEL_VIZ_DIR  # Added ANNOTATIONS_DIR
 ]:
     os.makedirs(directory, exist_ok=True)

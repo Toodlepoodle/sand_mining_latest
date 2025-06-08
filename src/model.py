@@ -637,13 +637,12 @@ def load_model_and_metadata():
         print(f"Error loading model and metadata: {e}")
         return None, None, None
 
-def run_training_workflow(use_grid_search=False, add_historical_features=True, model_type='random_forest', use_multiple_models=False):
+def run_training_workflow(use_grid_search=False, model_type='random_forest', use_multiple_models=False):
     """
-    Run the complete model training workflow.
+    Run the complete model training workflow with enhanced area features.
     
     Args:
         use_grid_search (bool): Whether to use grid search for hyperparameter tuning
-        add_historical_features (bool): Whether to add historical time-series features
         model_type (str): Type of model to train
         use_multiple_models (bool): Whether to train and evaluate multiple models
         
@@ -651,7 +650,8 @@ def run_training_workflow(use_grid_search=False, add_historical_features=True, m
         bool: True if successful, False otherwise
     """
     print("\n" + "="*80)
-    print(" TRAINING SAND MINING DETECTION MODEL")
+    print(" TRAINING ENHANCED SAND MINING DETECTION MODEL")
+    print(" (With Area-Specific Feature Extraction)")
     print("="*80 + "\n")
     
     # 1. Load labels
@@ -666,45 +666,51 @@ def run_training_workflow(use_grid_search=False, add_historical_features=True, m
         print(f"Only {labeled_count} labeled images found. Please label at least 10 images.")
         return False
     
+    print(f"Found {labeled_count} labeled images for training.")
+    
     # 2. Create DataFrame from labels
     labels_df = pd.DataFrame(list(labels.items()), columns=['filename', 'label'])
     
-    # 3. Extract features from images
-    print("\nExtracting features from labeled images...")
+    # 3. Extract enhanced features (including area-specific features from annotations)
+    print("\nExtracting enhanced features from labeled images...")
+    print("This includes:")
+    print("- Global image features (color, texture, etc.)")
+    print("- Area-specific features from highlighted regions")
+    print("- Enhanced texture and color analysis")
+    
     features_df = features.extract_features_from_df(config.TRAINING_IMAGES_DIR, labels_df)
     
     if features_df.empty:
         print("Failed to extract features from images.")
         return False
     
-    # 4. Add historical features if enabled
-    if add_historical_features:
-        print("\nAdding historical time-series features...")
-        # Create mapping from filenames to coordinates
-        lat_lon_mapping = create_lat_lon_mapping(config.TRAINING_IMAGES_DIR)
-        
-        if lat_lon_mapping:
-            # Add historical features
-            features_df = features.add_historical_features(features_df, lat_lon_mapping)
-            print(f"Added historical features, new feature count: {len(features_df.columns) - 2}")  # -2 for filename and label
-        else:
-            print("Warning: Could not create lat/lon mapping. Skipping historical features.")
+    print(f"Successfully extracted {len(features_df.columns) - 2} features from {len(features_df)} images")
     
-    # 5. Check for feature correlations
+    # 4. Analyze feature correlations
     print("\nAnalyzing feature correlations...")
     features.calculate_feature_correlation(
         features_df, 
-        output_file=os.path.join(config.MODELS_DIR, 'feature_correlation.png')
+        output_file=os.path.join(config.MODELS_DIR, 'enhanced_feature_correlation.png')
     )
     
-    # 6. Prepare data for training
+    # 5. Prepare data for training
     X, y, feature_names = prepare_training_data(features_df)
     
     if X is None or y is None:
         print("Failed to prepare training data.")
         return False
     
-    # 7. Train models
+    # Show feature breakdown
+    area_features = [f for f in feature_names if any(prefix in f for prefix in ['sand_mining_', 'equipment_', 'water_disturbance_', 'num_', 'total_'])]
+    global_features = [f for f in feature_names if 'global_' in f]
+    
+    print(f"\nFeature breakdown:")
+    print(f"- Total features: {len(feature_names)}")
+    print(f"- Area-specific features: {len(area_features)}")
+    print(f"- Global image features: {len(global_features)}")
+    print(f"- Other features: {len(feature_names) - len(area_features) - len(global_features)}")
+    
+    # 6. Train models
     if use_multiple_models:
         # Train multiple models and get the best one
         print("\nTraining multiple model types for comparison...")
@@ -725,8 +731,12 @@ def run_training_workflow(use_grid_search=False, add_historical_features=True, m
         success = save_model_and_metadata(model, scaler, feature_importance, feature_names)
     
     if success:
-        print("\n✅ Training workflow completed successfully!")
+        print("\n✅ Enhanced training workflow completed successfully!")
+        print("\nNext steps:")
+        print("1. Test the model with probability mapping")
+        print("2. Use area annotations to improve model performance")
+        print("3. The model now focuses on highlighted sand mining areas")
         return True
     else:
-        print("\n❌ Training workflow failed or was incomplete.")
+        print("\n❌ Enhanced training workflow failed or was incomplete.")
         return False

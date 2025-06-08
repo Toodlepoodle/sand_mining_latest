@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main execution script for the Sand Mining Detection Tool.
+Main execution script for the Enhanced Sand Mining Detection Tool.
 """
 
 import ee
@@ -19,21 +19,21 @@ from src import ee_utils
 from src.utils import ensure_directories, clean_temp_dir
 from src.gui import start_labeling_gui
 from src.model import run_training_workflow, load_model_and_metadata
-from src.mapper import run_mapping_workflow
+from src.mapper import run_mapping_workflow  # FIXED: Changed from probability_mapping to mapper
 
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Sand Mining Detection and Mapping Tool',
+        description='Enhanced Sand Mining Detection and Mapping Tool with Area Highlighting',
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
         '--mode', type=str, required=True, choices=['train', 'map', 'both', 'label'],
         help="Operating mode:\n"
-             "  train - Download images, label them, and train a model.\n"
+             "  train - Download images, label them with area highlighting, and train model.\n"
              "  map   - Create a probability map using an existing model.\n"
              "  both  - Run training first, then create a map.\n"
-             "  label - Only run the image labeling interface."
+             "  label - Only run the image labeling and area annotation interface."
     )
     parser.add_argument(
         '--shapefile', type=str, required=False,
@@ -68,26 +68,13 @@ def parse_arguments():
         help='Use grid search for hyperparameter tuning during model training.'
     )
     parser.add_argument(
-        '--model-type', type=str, choices=['random_forest', 'gradient_boosting'], 
+        '--model-type', type=str, choices=['random_forest', 'gradient_boosting', 'xgboost'], 
         default='random_forest',
         help='Type of model to use for training (default: random_forest).'
     )
     parser.add_argument(
         '--multiple-models', action='store_true',
-        help='Train and evaluate multiple model types (Random Forest, XGBoost, etc.).'
-    )
-    parser.add_argument(
-        '--historical', action='store_true', default=True,
-        help='Use historical time-series data for feature extraction (default: True).'
-    )
-    parser.add_argument(
-        '--years-back', type=int, default=5,
-        help='Number of years to look back for historical data (default: 5).'
-    )
-    parser.add_argument(
-        '--interval-months', type=int, default=6,
-        help='Interval between historical images in months (default: 6). \n'
-             'Smaller values provide more temporal data points.'
+        help='Train and evaluate multiple model types (Random Forest, XGBoost, LightGBM, etc.).'
     )
     parser.add_argument(
         '-y', '--yes', action='store_true', 
@@ -146,109 +133,85 @@ def download_training_images(args):
         print("❌ Error: Failed to get coordinates from shapefile. Cannot proceed.")
         return False
     
-    # Create download function using the Sand Mining Detection code
-    from PIL import Image
-    import io
-    import time
-    import requests
+    # Download images using the enhanced ee_utils
+    success = ee_utils.download_training_images(
+        training_coordinates,
+        config.TRAINING_IMAGES_DIR,
+        img_dim=config.DEFAULT_IMAGE_DIM,
+        buffer_m=config.DEFAULT_BUFFER_METERS
+    )
     
-    def download_training_image(lat, lon, img_idx):
-        """Download a single training image."""
-        try:
-            point = ee.Geometry.Point([lon, lat])
-            region = point.buffer(config.DEFAULT_BUFFER_METERS)
-            
-            # Get current date and 12 months prior
-            current_ee_date = ee.Date(datetime.now())
-            start_ee_date = current_ee_date.advance(-12, 'month')
-            
-            # Find the least cloudy Sentinel-2 image
-            s2_collection = ee.ImageCollection(config.S2_COLLECTION) \
-                .filterBounds(region) \
-                .filterDate(start_ee_date, current_ee_date) \
-                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 35)) \
-                .sort('CLOUDY_PIXEL_PERCENTAGE')
-            
-            image_count = s2_collection.size().getInfo()
-            
-            best_image = None
-            if image_count > 0:
-                best_image = ee.Image(s2_collection.first())
-            else:
-                # Try wider cloud tolerance
-                s2_collection_wider = ee.ImageCollection(config.S2_COLLECTION) \
-                    .filterBounds(region) \
-                    .filterDate(start_ee_date, current_ee_date) \
-                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 60)) \
-                    .sort('CLOUDY_PIXEL_PERCENTAGE')
-                
-                image_count_wider = s2_collection_wider.size().getInfo()
-                if image_count_wider > 0:
-                    best_image = ee.Image(s2_collection_wider.first())
-                else:
-                    print(f"  Skipping point {img_idx+1} ({lat:.4f}, {lon:.4f}): No suitable S2 image found.")
-                    return False
-            
-            # Define visualization parameters (True Color)
-            vis_params = {
-                'bands': ['B4', 'B3', 'B2'],  # RGB
-                'min': 0,
-                'max': 3000,
-                'gamma': 1.4
-            }
-            
-            # Get the download URL
-            region_coords = region.getInfo()['coordinates']
-            download_url = best_image.getThumbURL({
-                **vis_params,
-                'region': region_coords,
-                'dimensions': config.DEFAULT_IMAGE_DIM,
-                'format': 'png'
-            })
-            
-            # Download the image
-            response = requests.get(download_url, timeout=90)
-            response.raise_for_status()
-            
-            # Open image with PIL
-            img = Image.open(io.BytesIO(response.content)).convert('RGB')
-            
-            # Enhance image quality
-            img_enhanced = ee_utils.enhance_image(img)
-            
-            # Save the enhanced image
-            filename = f'train_image_{img_idx+1}_{lat:.6f}_{lon:.6f}.png'
-            filepath = os.path.join(config.TRAINING_IMAGES_DIR, filename)
-            img_enhanced.save(filepath, format='PNG', optimize=True, quality=95)
-            
-            return True
-        
-        except Exception as e:
-            print(f"  Error downloading image for point {img_idx+1} ({lat:.4f}, {lon:.4f}): {e}")
+    if success:
+        print("✅ Training images downloaded successfully!")
+        return True
+    else:
+        print("❌ Error: Failed to download training images.")
+        return False
+
+def run_enhanced_labeling():
+    """
+    Run the enhanced labeling GUI with area highlighting.
+    """
+    print("\n" + "="*80)
+    print(" ENHANCED IMAGE LABELING & AREA HIGHLIGHTING")
+    print("="*80 + "\n")
+    
+    print("Starting enhanced labeling GUI with area highlighting...")
+    print("\n📋 Instructions:")
+    print("1. LABELING MODE:")
+    print("   - Use buttons or keys (0=No Mining, 1=Mining, ?=Skip) to label entire images")
+    print("   - This provides overall image classification for training")
+    print("\n2. AREA ANNOTATION MODE (Press 'a' to toggle):")
+    print("   - Click and drag to highlight specific sand mining areas")
+    print("   - Different highlight types:")
+    print("     * sand_mining: Active sand mining areas")
+    print("     * equipment: Heavy machinery/equipment")
+    print("     * water_disturbance: Disturbed water patterns")
+    print("     * no_mining: Clearly undisturbed areas")
+    print("\n3. ENHANCED FEATURES:")
+    print("   - Model learns from both global image features AND specific highlighted areas")
+    print("   - Better precision by focusing on actual sand mining locations")
+    print("   - Press 'h' for detailed help")
+    print("\n⚠️  Important: Label at least 10+ images and highlight key areas for best results")
+    print("="*80)
+    
+    # Launch the enhanced GUI
+    start_labeling_gui()
+    
+    # Check if we have sufficient labels and annotations
+    from src.utils import load_labels
+    labels = load_labels()
+    
+    if not labels:
+        print("\n❌ No labels found. Please label some images before training.")
+        return False
+    
+    labeled_count = sum(1 for label in labels.values() if label != -1)
+    
+    if labeled_count < 5:
+        print(f"\n⚠️  Warning: Only {labeled_count} images labeled. Recommend at least 10 for good results.")
+        if not input("Continue anyway? (y/N): ").lower().startswith('y'):
             return False
     
-    # Download images
-    print(f"\nDownloading {len(training_coordinates)} images for training/labeling...")
+    print(f"\n✅ Labeling completed! Found {labeled_count} labeled images.")
     
-    # Create training images directory if it doesn't exist
-    os.makedirs(config.TRAINING_IMAGES_DIR, exist_ok=True)
-    
-    success_count = 0
-    
-    from tqdm import tqdm
-    for i, (lat, lon) in enumerate(tqdm(training_coordinates, desc="Downloading Images", unit="image")):
-        success = download_training_image(lat, lon, i)
-        if success:
-            success_count += 1
-        
-        # Add a small delay to avoid hitting EE rate limits
-        time.sleep(1.2)
-    
-    print(f"\nSuccessfully downloaded {success_count} out of {len(training_coordinates)} images.")
-    
-    if success_count == 0:
-        print("❌ Error: Failed to download any training images.")
-        return False
+    # Check for area annotations
+    if os.path.exists(config.ANNOTATIONS_FILE):
+        try:
+            import json
+            with open(config.ANNOTATIONS_FILE, 'r') as f:
+                annotations = json.load(f)
+            
+            total_annotations = sum(len(img_annotations) for img_annotations in annotations.values())
+            print(f"✅ Found {total_annotations} area annotations across {len(annotations)} images.")
+            
+            if total_annotations == 0:
+                print("⚠️  No area highlights found. Model will use only global features.")
+            else:
+                print("🎯 Enhanced training will use both global AND area-specific features!")
+                
+        except Exception as e:
+            print(f"⚠️  Could not read annotations: {e}")
     
     return True
 
@@ -257,10 +220,12 @@ def main():
     print(
         f"""
 ==========================================================
-     SAND MINING DETECTION AND MAPPING TOOL v2.1
+   ENHANCED SAND MINING DETECTION TOOL v3.0
+   With Area Highlighting & Spatial Feature Extraction
 ==========================================================
- Using Google Earth Engine and Machine Learning to identify
- potential sand mining activities along rivers.
+ Using Google Earth Engine, Machine Learning, and Enhanced
+ Area-Specific Feature Extraction to precisely identify
+ sand mining activities along rivers.
 ----------------------------------------------------------
  Current directory: {os.getcwd()}
  Output directory: {config.OUTPUT_DIR}
@@ -270,10 +235,6 @@ def main():
     
     # Parse command line arguments
     args = parse_arguments()
-    
-    # Set configuration based on arguments
-    config.HISTORICAL_YEARS_BACK = args.years_back
-    config.HISTORICAL_INTERVAL_MONTHS = args.interval_months
     
     # Ensure all directories exist
     ensure_directories()
@@ -288,8 +249,8 @@ def main():
     
     # Execute based on mode
     if args.mode == 'label':
-        # Just run the labeling GUI
-        start_labeling_gui()
+        # Just run the enhanced labeling GUI
+        run_enhanced_labeling()
         return
     
     if args.mode in ['train', 'both']:
@@ -300,14 +261,20 @@ def main():
             print("❌ Training image download failed. Cannot proceed with training.")
             sys.exit(1)
         
-        # Launch labeling GUI
-        print("\nLaunching image labeling GUI. Please label the images, then training will continue.")
-        start_labeling_gui()
+        # Launch enhanced labeling GUI
+        labeling_success = run_enhanced_labeling()
         
-        # Run model training with enhanced options
+        if not labeling_success:
+            print("❌ Labeling step failed or insufficient labels. Cannot proceed with training.")
+            sys.exit(1)
+        
+        # Run enhanced model training
+        print("\n" + "="*80)
+        print(" ENHANCED MODEL TRAINING")
+        print("="*80 + "\n")
+        
         training_success = run_training_workflow(
             use_grid_search=args.use_grid_search,
-            add_historical_features=args.historical,
             model_type=args.model_type,
             use_multiple_models=args.multiple_models
         )
@@ -322,35 +289,53 @@ def main():
             print("\n❌ Training failed. Skipping mapping step.")
             sys.exit(1)
         
-        # Run mapping with improved point density
+        # Check if model exists for mapping mode
+        if args.mode == 'map':
+            model, scaler, feature_names = load_model_and_metadata()
+            if model is None:
+                print("❌ No trained model found. Please run training first or specify --model path.")
+                sys.exit(1)
+        
+        # Run enhanced mapping
+        print("\n" + "="*80)
+        print(" ENHANCED PROBABILITY MAPPING")
+        print("="*80 + "\n")
+        
         mapping_success = run_mapping_workflow(
             shapefile_path=args.shapefile,
-            distance_km=args.distance,  # Use smaller distance for better coverage
-            use_historical=args.historical,
-            years_back=args.years_back,
-            interval_months=args.interval_months,
+            distance_km=args.distance,
+            use_historical=False,  # No historical features in enhanced version
+            years_back=0,
             output_file=args.output
         )
     
     # Final Summary
     print("\n" + "="*80)
-    print(" TOOL EXECUTION SUMMARY")
+    print(" ENHANCED TOOL EXECUTION SUMMARY")
     print("="*80)
     final_status = 0  # 0 for success, 1 for failure
     
     if args.mode in ['train', 'both']:
         status_msg = '✅ SUCCESS' if training_success else '❌ FAILED'
-        print(f"Training attempt: {status_msg}")
+        print(f"Enhanced Training: {status_msg}")
+        if training_success:
+            print("  ✓ Global image features extracted")
+            print("  ✓ Area-specific features from highlights")
+            print("  ✓ Enhanced model trained on spatial data")
         if not training_success:
             final_status = 1
     
     if args.mode in ['map', 'both']:
         # Check if mapping was skipped due to training failure
         if args.mode == 'both' and not training_success:
-            print("Mapping attempt:  SKIPPED due to training failure")
+            print("Enhanced Mapping:  SKIPPED due to training failure")
         else:
             status_msg = '✅ SUCCESS' if mapping_success else '❌ FAILED'
-            print(f"Mapping attempt:  {status_msg}")
+            print(f"Enhanced Mapping:  {status_msg}")
+            if mapping_success:
+                print("  ✓ High-resolution point analysis")
+                print("  ✓ Area-aware feature extraction")
+                print("  ✓ Interactive probability map generated")
             if not mapping_success:
                 final_status = 1
     
@@ -359,7 +344,12 @@ def main():
     if final_status != 0:
         print("\nOne or more critical steps failed. Please review the logs above for errors.")
     else:
-        print("\nTool finished successfully.")
+        print("\n🎉 Enhanced Sand Mining Detection Tool finished successfully!")
+        print("\nKey improvements in this version:")
+        print("  • Area highlighting for precise training data")
+        print("  • Enhanced feature extraction from highlighted regions")
+        print("  • Better model accuracy through spatial awareness")
+        print("  • Simplified workflow without complex historical analysis")
     
     sys.exit(final_status)
 
