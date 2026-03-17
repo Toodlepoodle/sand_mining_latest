@@ -607,3 +607,185 @@ def calculate_feature_correlation(features_df, output_file=None):
 def extract_all_features(image_path):
     """Alias for extract_enhanced_features"""
     return extract_enhanced_features(image_path)
+
+
+def extract_historical_trend_features(lat, lon, years_back=3, buffer_m=1500):
+    """
+    Extract temporal trend features for a training point using its lat/lon.
+
+    Literature basis:
+    - Li et al. (2024): quarterly NDVI/BSI slopes detect sandbar dynamics (F1 0.85)
+    - Bendixen et al. (2021): trends reveal 20-50% more extractions vs snapshots
+    - EuroMineNet (2025): temporal BFAST > single-date classification
+
+    For each labeled training image (which has lat/lon encoded in its filename),
+    this fetches 3 years of quarterly Sentinel-2 composites and computes the
+    linear slope of NDVI, NDWI, MNDWI, and BSI over time.
+
+    Args:
+        lat (float): Latitude of the training point
+        lon (float): Longitude of the training point
+        years_back (int): Number of years to look back
+        buffer_m (int): Buffer radius in metres
+
+    Returns:
+        dict: Historical trend features (NDVI_trend, BSI_trend, etc.)
+              Returns zeros on failure so training is never blocked.
+    """
+    trend_features = {
+        'NDVI_trend':  0.0,
+        'NDWI_trend':  0.0,
+        'MNDWI_trend': 0.0,
+        'BSI_trend':   0.0,
+        'hist_periods': 0,
+    }
+
+    if lat is None or lon is None:
+        return trend_features
+
+    try:
+        from src import ee_utils
+        from scipy import stats as scipy_stats
+
+        historical_data = ee_utils.get_historical_images(
+            lat, lon, buffer_m=buffer_m, years_back=years_back, interval_months=3
+        )
+
+        if not historical_data:
+            return trend_features
+
+        historical_stats = ee_utils.extract_historical_band_stats(
+            historical_data, lat, lon, buffer_m=buffer_m
+        )
+
+        if historical_stats.empty or len(historical_stats) < 3:
+            return trend_features
+
+        trend_features['hist_periods'] = len(historical_stats)
+
+        x = np.arange(len(historical_stats))
+
+        for index_name in ['NDVI', 'NDWI', 'MNDWI', 'BSI']:
+            col = f'{index_name}_mean'
+            if col in historical_stats.columns:
+                y = historical_stats[col].values
+                valid = ~np.isnan(y)
+                if valid.sum() >= 3:
+                    try:
+                        slope, _, _, _, _ = scipy_stats.linregress(x[valid], y[valid])
+                        trend_features[f'{index_name}_trend'] = float(slope)
+                    except Exception:
+                        pass
+
+    except Exception as e:
+        # Never crash training — return zeros silently
+        pass
+
+    return trend_features
+
+
+def parse_lat_lon_from_filename(filename):
+    """
+    Parse lat/lon from training image filename.
+    Expected format: train_image_N_LAT_LON.png
+    e.g. train_image_5_23.170659_87.954341.png
+
+    Returns (lat, lon) or (None, None) if parsing fails.
+    """
+    try:
+        parts = os.path.splitext(filename)[0].split('_')
+        # Last two parts should be lat and lon
+        lon = float(parts[-1])
+        lat = float(parts[-2])
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            return lat, lon
+    except Exception:
+        pass
+    return None, None
+
+
+def extract_features_with_history(image_path, years_back=3, buffer_m=1500):
+    """
+    Full feature extraction combining:
+    1. Current image features (spectral, texture, area annotations)
+    2. Historical trend features from GEE time-series
+
+    This is the training-time feature extractor that ensures training and
+    mapping use identical feature vectors.
+
+    Args:
+        image_path (str): Path to the training image
+        years_back (int): Years of historical data to use
+        buffer_m (int): Buffer in metres
+
+    Returns:
+        dict: Combined feature dictionary
+    """
+    # Current image features
+    current_features = extract_enhanced_features(image_path)
+
+    # Parse coordinates from filename
+    filename = os.path.basename(image_path)
+    lat, lon = parse_lat_lon_from_filename(filename)
+
+    # Historical trend features
+    if lat is not None and years_back > 0:
+        hist_features = extract_historical_trend_features(
+            lat, lon, years_back=years_back, buffer_m=buffer_m
+        )
+        current_features.update(hist_features)
+    else:
+        # Add zero-valued trend features so feature vector length is consistent
+        current_features.update({
+            'NDVI_trend':   0.0,
+            'NDWI_trend':   0.0,
+            'MNDWI_trend':  0.0,
+            'BSI_trend':    0.0,
+            'hist_periods': 0,
+        })
+
+    return current_features
+
+
+def extract_features_from_df_with_history(image_folder, dataframe,
+                                           years_back=3, buffer_m=1500):
+    """
+    Extract full features (current + historical) for all labeled images.
+
+    Use this instead of extract_features_from_df when historical data
+    should be included in training.
+
+    Args:
+        image_folder (str): Folder containing training images
+        dataframe (pd.DataFrame): DataFrame with 'filename' and 'label' columns
+        years_back (int): Years of historical imagery to use
+        buffer_m (int): Buffer radius in metres
+
+    Returns:
+        pd.DataFrame: Feature DataFrame with historical trend columns included
+    """
+    features_list = []
+
+    for idx, row in tqdm(dataframe.iterrows(), total=len(dataframe),
+                         desc="Extracting Features + History"):
+        if 'filename' not in row:
+            continue
+
+        img_path = os.path.join(image_folder, row['filename'])
+        feat = extract_features_with_history(img_path, years_back=years_back,
+                                              buffer_m=buffer_m)
+
+        if feat:
+            feat['filename'] = row['filename']
+            if 'label' in row:
+                feat['label'] = row['label']
+            features_list.append(feat)
+
+    if features_list:
+        features_df = pd.DataFrame(features_list)
+        n_feat = len(features_df.columns) - 2
+        print(f"Extracted {n_feat} features (incl. historical trends) "
+              f"from {len(features_df)} images")
+        return features_df
+    else:
+        return pd.DataFrame()

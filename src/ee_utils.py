@@ -919,6 +919,173 @@ def cleanup_temp_files(temp_folder='temp'):
     except Exception as e:
         print(f"Warning: Error during cleanup: {e}")
 
+def get_historical_images(lat, lon, buffer_m=1500, years_back=3, interval_months=3):
+    """
+    Retrieve historical Sentinel-2 imagery for a point across multiple time periods.
+
+    Args:
+        lat (float): Latitude
+        lon (float): Longitude
+        buffer_m (int): Buffer around point in meters
+        years_back (int): Number of years to look back
+        interval_months (int): Interval between periods in months
+
+    Returns:
+        list: List of dicts with keys 'date', 'image', 'period_label'
+              Returns empty list if nothing found or on error.
+    """
+    try:
+        point = ee.Geometry.Point([lon, lat])
+        region = point.buffer(buffer_m)
+
+        end_dt   = datetime.datetime.now()
+        start_dt = end_dt - datetime.timedelta(days=365 * years_back)
+
+        historical_data = []
+
+        # Walk backwards from end_dt in interval_months steps
+        current_end = end_dt
+        while current_end > start_dt:
+            current_start = current_end - datetime.timedelta(days=30 * interval_months)
+            if current_start < start_dt:
+                current_start = start_dt
+
+            try:
+                s2_col = (
+                    ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                    .filterBounds(region)
+                    .filterDate(ee.Date(current_start), ee.Date(current_end))
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 35))
+                    .sort('CLOUDY_PIXEL_PERCENTAGE')
+                )
+
+                count = s2_col.size().getInfo()
+
+                if count == 0:
+                    # Relax cloud filter
+                    s2_col = (
+                        ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                        .filterBounds(region)
+                        .filterDate(ee.Date(current_start), ee.Date(current_end))
+                        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 60))
+                        .sort('CLOUDY_PIXEL_PERCENTAGE')
+                    )
+                    count = s2_col.size().getInfo()
+
+                if count > 0:
+                    best = ee.Image(s2_col.first())
+                    date_millis = best.get('system:time_start').getInfo()
+                    img_date = datetime.datetime.fromtimestamp(date_millis / 1000)
+                    period_label = img_date.strftime('%Y-%m')
+
+                    historical_data.append({
+                        'date':         img_date,
+                        'period_label': period_label,
+                        'image':        best,
+                        'region':       region,
+                    })
+
+            except Exception as period_err:
+                # Skip this period silently
+                pass
+
+            current_end = current_start
+
+        # Return in chronological order (oldest first)
+        historical_data.sort(key=lambda x: x['date'])
+        return historical_data
+
+    except Exception as e:
+        print(f"Warning: get_historical_images failed for ({lat:.4f}, {lon:.4f}): {e}")
+        return []
+
+
+def extract_historical_band_stats(historical_data, lat, lon, buffer_m=1500):
+    """
+    Extract per-period band statistics from historical imagery.
+
+    For each period in historical_data, computes mean values of key spectral
+    indices (NDVI, NDWI, MNDWI, BSI) over the buffered region.
+
+    Args:
+        historical_data (list): Output of get_historical_images()
+        lat (float): Latitude  (used only for logging)
+        lon (float): Longitude (used only for logging)
+        buffer_m (int): Buffer in metres
+
+    Returns:
+        pd.DataFrame: Rows = periods, columns = date + index_mean columns.
+                      Returns empty DataFrame on failure.
+    """
+    if not historical_data:
+        return pd.DataFrame()
+
+    records = []
+
+    for period in historical_data:
+        try:
+            image  = period['image']
+            region = period['region']
+
+            # Rename bands to standard names for index calculation
+            band_list = image.bandNames().getInfo()
+
+            if 'B2' in band_list:   # Sentinel-2
+                renamed = image.select(
+                    ['B2', 'B3', 'B4', 'B8', 'B11', 'B12'],
+                    ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']
+                )
+            elif 'SR_B2' in band_list:  # Landsat 8/9
+                renamed = image.select(
+                    ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'],
+                    ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']
+                )
+            else:
+                continue  # Unknown sensor, skip
+
+            # Compute indices
+            ndvi  = renamed.normalizedDifference(['NIR',   'Red'  ]).rename('NDVI')
+            ndwi  = renamed.normalizedDifference(['Green', 'NIR'  ]).rename('NDWI')
+            mndwi = renamed.normalizedDifference(['Green', 'SWIR1']).rename('MNDWI')
+
+            numer = renamed.select('SWIR1').add(renamed.select('Red')).subtract(
+                        renamed.select('NIR').add(renamed.select('Blue')))
+            denom = renamed.select('SWIR1').add(renamed.select('Red')).add(
+                        renamed.select('NIR').add(renamed.select('Blue')))
+            bsi   = numer.divide(denom).rename('BSI')
+
+            index_img = ndvi.addBands([ndwi, mndwi, bsi])
+
+            # Reduce to mean over the region
+            stats = index_img.reduceRegion(
+                reducer  = ee.Reducer.mean(),
+                geometry = region,
+                scale    = 20,
+                maxPixels= 1e9
+            ).getInfo()
+
+            if stats:
+                record = {
+                    'date':        period['date'],
+                    'period_label': period['period_label'],
+                    'NDVI_mean':   stats.get('NDVI',  np.nan),
+                    'NDWI_mean':   stats.get('NDWI',  np.nan),
+                    'MNDWI_mean':  stats.get('MNDWI', np.nan),
+                    'BSI_mean':    stats.get('BSI',   np.nan),
+                }
+                records.append(record)
+
+        except Exception as period_err:
+            # Skip problematic periods
+            continue
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records).sort_values('date').reset_index(drop=True)
+    return df
+
+
 def validate_coordinates(coordinates_list):
     """
     Validate a list of coordinates.

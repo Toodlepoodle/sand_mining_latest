@@ -272,44 +272,29 @@ class SandMiningProbabilityMapper:
             temp_file = os.path.join(self.temp_folder, temp_filename)
             img.save(temp_file)
             
-            # Extract features from the image
-            image_features = features.extract_all_features(temp_file)
-            
-            if not image_features:
-                return None
-            
-            # Add historical features if enabled
-            historical_features = {}
+            # Extract features using same function as training
+            # This ensures current image features + historical trend features
+            # are computed identically to how training data was prepared
             if use_historical and years_back > 0:
-                # Get historical data
-                historical_data = ee_utils.get_historical_images(lat, lon, buffer_m=buffer_m, years_back=years_back)
-                
-                if historical_data:
-                    # Extract statistics from historical data
-                    historical_stats = ee_utils.extract_historical_band_stats(historical_data, lat, lon, buffer_m=buffer_m)
-                    
-                    if not historical_stats.empty:
-                        # Calculate trend features for important indices
-                        for index in ['NDVI', 'NDWI', 'MNDWI', 'BSI']:
-                            col_name = f"{index}_mean"
-                            if col_name in historical_stats.columns:
-                                # Calculate trend (slope) over time
-                                y = historical_stats[col_name].values
-                                x = np.arange(len(y))
-                                
-                                if len(x) > 1 and not np.all(np.isnan(y)):
-                                    # Remove NaN values
-                                    valid = ~np.isnan(y)
-                                    if sum(valid) > 1:
-                                        try:
-                                            from scipy import stats as scipy_stats
-                                            slope, _, _, _, _ = scipy_stats.linregress(x[valid], y[valid])
-                                            historical_features[f"{index}_trend"] = slope
-                                        except Exception as e:
-                                            print(f"Error calculating trend for {index}: {e}")
+                # Rename temp file to match lat/lon parse format expected by
+                # extract_features_with_history -> parse_lat_lon_from_filename
+                hist_temp_file = os.path.join(
+                    self.temp_folder,
+                    f'train_image_0_{lat:.6f}_{lon:.6f}.png'
+                )
+                img.save(hist_temp_file)
+                all_features = features.extract_features_with_history(
+                    hist_temp_file, years_back=years_back, buffer_m=buffer_m
+                )
+                try:
+                    os.remove(hist_temp_file)
+                except Exception:
+                    pass
+            else:
+                all_features = features.extract_all_features(temp_file)
             
-            # Combine features
-            all_features = {**image_features, **historical_features}
+            if not all_features:
+                return None
             
             # Convert to vector matching training format
             if self.feature_names:
@@ -372,8 +357,8 @@ class SandMiningProbabilityMapper:
             }
             
             # Add historical change info if available
-            if 'NDVI_trend' in historical_features:
-                result['historical_change'] = historical_features['NDVI_trend']
+            if 'NDVI_trend' in all_features:
+                result['historical_change'] = all_features['NDVI_trend']
             
             # Add top features info if available
             if top_features:

@@ -19,7 +19,7 @@ from src import ee_utils
 from src.utils import ensure_directories, clean_temp_dir
 from src.gui import start_labeling_gui
 from src.model import run_training_workflow, load_model_and_metadata
-from src.mapper import run_mapping_workflow  # FIXED: Changed from probability_mapping to mapper
+from src.mapper import run_mapping_workflow
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -68,7 +68,7 @@ def parse_arguments():
         help='Use grid search for hyperparameter tuning during model training.'
     )
     parser.add_argument(
-        '--model-type', type=str, choices=['random_forest', 'gradient_boosting', 'xgboost'], 
+        '--model-type', type=str, choices=['random_forest', 'gradient_boosting', 'xgboost'],
         default='random_forest',
         help='Type of model to use for training (default: random_forest).'
     )
@@ -76,63 +76,72 @@ def parse_arguments():
         '--multiple-models', action='store_true',
         help='Train and evaluate multiple model types (Random Forest, XGBoost, LightGBM, etc.).'
     )
+    # ── ADDED: years-back argument ──────────────────────────────────────────
     parser.add_argument(
-        '-y', '--yes', action='store_true', 
+        '--years-back', type=int, default=0,
+        help='Number of years of historical imagery to include in analysis (default: 0).\n'
+             'Example: --years-back 3 will pull Sentinel-2 data from the last 3 years.\n'
+             'Setting this > 0 enables historical trend features (NDVI trend, etc.).'
+    )
+    # ───────────────────────────────────────────────────────────────────────
+    parser.add_argument(
+        '-y', '--yes', action='store_true',
         help='Automatically answer yes to confirmations.'
     )
-    
+
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
         sys.exit(1)
-    
+
     args = parser.parse_args()
-    
+
     # Validate required arguments based on mode
     if args.mode in ['train', 'map', 'both'] and not args.shapefile:
         parser.error(f"--shapefile is required for mode '{args.mode}'")
-    
+
     return args
+
 
 def download_training_images(args):
     """
     Download training images from a shapefile.
-    
+
     Args:
         args: Command line arguments
-        
+
     Returns:
         bool: True if successful, False otherwise
     """
     print("\n" + "="*80)
     print(" DOWNLOADING TRAINING IMAGES")
     print("="*80 + "\n")
-    
+
     # Initialize Earth Engine
     if not ee_utils.initialize_ee():
         print("❌ Error: Earth Engine could not be initialized. Exiting.")
         return False
-    
+
     # Load shapefile and get sampling points for training
     from src.utils import load_shapefile_and_get_points
     import random
-    
+
     # Get coordinates from the shapefile
     coordinates, river_gdf = load_shapefile_and_get_points(
         args.shapefile,
         distance_km=args.distance
     )
-    
+
     # Sample the coordinates if needed
     if coordinates and len(coordinates) > args.sample_size:
         print(f"Sampling {args.sample_size} points from {len(coordinates)} available points")
         training_coordinates = random.sample(coordinates, args.sample_size)
     else:
         training_coordinates = coordinates
-    
+
     if not training_coordinates:
         print("❌ Error: Failed to get coordinates from shapefile. Cannot proceed.")
         return False
-    
+
     # Download images using the enhanced ee_utils
     success = ee_utils.download_training_images(
         training_coordinates,
@@ -140,13 +149,14 @@ def download_training_images(args):
         img_dim=config.DEFAULT_IMAGE_DIM,
         buffer_m=config.DEFAULT_BUFFER_METERS
     )
-    
+
     if success:
         print("✅ Training images downloaded successfully!")
         return True
     else:
         print("❌ Error: Failed to download training images.")
         return False
+
 
 def run_enhanced_labeling():
     """
@@ -155,7 +165,7 @@ def run_enhanced_labeling():
     print("\n" + "="*80)
     print(" ENHANCED IMAGE LABELING & AREA HIGHLIGHTING")
     print("="*80 + "\n")
-    
+
     print("Starting enhanced labeling GUI with area highlighting...")
     print("\n📋 Instructions:")
     print("1. LABELING MODE:")
@@ -174,46 +184,47 @@ def run_enhanced_labeling():
     print("   - Press 'h' for detailed help")
     print("\n⚠️  Important: Label at least 10+ images and highlight key areas for best results")
     print("="*80)
-    
+
     # Launch the enhanced GUI
     start_labeling_gui()
-    
+
     # Check if we have sufficient labels and annotations
     from src.utils import load_labels
     labels = load_labels()
-    
+
     if not labels:
         print("\n❌ No labels found. Please label some images before training.")
         return False
-    
+
     labeled_count = sum(1 for label in labels.values() if label != -1)
-    
+
     if labeled_count < 5:
         print(f"\n⚠️  Warning: Only {labeled_count} images labeled. Recommend at least 10 for good results.")
         if not input("Continue anyway? (y/N): ").lower().startswith('y'):
             return False
-    
+
     print(f"\n✅ Labeling completed! Found {labeled_count} labeled images.")
-    
+
     # Check for area annotations
     if os.path.exists(config.ANNOTATIONS_FILE):
         try:
             import json
             with open(config.ANNOTATIONS_FILE, 'r') as f:
                 annotations = json.load(f)
-            
+
             total_annotations = sum(len(img_annotations) for img_annotations in annotations.values())
             print(f"✅ Found {total_annotations} area annotations across {len(annotations)} images.")
-            
+
             if total_annotations == 0:
                 print("⚠️  No area highlights found. Model will use only global features.")
             else:
                 print("🎯 Enhanced training will use both global AND area-specific features!")
-                
+
         except Exception as e:
             print(f"⚠️  Could not read annotations: {e}")
-    
+
     return True
+
 
 def main():
     """Main execution function."""
@@ -232,89 +243,96 @@ def main():
  Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 ----------------------------------------------------------"""
     )
-    
+
     # Parse command line arguments
     args = parse_arguments()
-    
+
     # Ensure all directories exist
     ensure_directories()
-    
+
     # Clean temporary directory
     clean_temp_dir()
-    
+
     # Track success status for each step
     download_success = False
     training_success = False
     mapping_success = False
-    
+
     # Execute based on mode
     if args.mode == 'label':
-        # Just run the enhanced labeling GUI
         run_enhanced_labeling()
         return
-    
+
     if args.mode in ['train', 'both']:
         # Download training images
         download_success = download_training_images(args)
-        
+
         if not download_success:
             print("❌ Training image download failed. Cannot proceed with training.")
             sys.exit(1)
-        
+
         # Launch enhanced labeling GUI
         labeling_success = run_enhanced_labeling()
-        
+
         if not labeling_success:
             print("❌ Labeling step failed or insufficient labels. Cannot proceed with training.")
             sys.exit(1)
-        
+
         # Run enhanced model training
         print("\n" + "="*80)
         print(" ENHANCED MODEL TRAINING")
         print("="*80 + "\n")
-        
+
         training_success = run_training_workflow(
             use_grid_search=args.use_grid_search,
             model_type=args.model_type,
             use_multiple_models=args.multiple_models
         )
-        
+
         if not training_success and args.mode == 'both':
             print("\n❌ Training failed. Skipping mapping step.")
             sys.exit(1)
-    
+
     if args.mode in ['map', 'both']:
         # In 'both' mode, only proceed if training was successful
         if args.mode == 'both' and not training_success:
             print("\n❌ Training failed. Skipping mapping step.")
             sys.exit(1)
-        
+
         # Check if model exists for mapping mode
         if args.mode == 'map':
             model, scaler, feature_names = load_model_and_metadata()
             if model is None:
                 print("❌ No trained model found. Please run training first or specify --model path.")
                 sys.exit(1)
-        
+
+        # Show historical data info if enabled
+        if args.years_back > 0:
+            print(f"\n📅 Historical analysis enabled: looking back {args.years_back} year(s)")
+            print("   This will extract temporal trend features (NDVI trend, etc.)")
+            print("   Note: Historical analysis takes longer per point.\n")
+
         # Run enhanced mapping
         print("\n" + "="*80)
         print(" ENHANCED PROBABILITY MAPPING")
         print("="*80 + "\n")
-        
+
+        # ── FIXED: pass years_back and use_historical through ──────────────
         mapping_success = run_mapping_workflow(
             shapefile_path=args.shapefile,
             distance_km=args.distance,
-            use_historical=False,  # No historical features in enhanced version
-            years_back=0,
+            use_historical=args.years_back > 0,
+            years_back=args.years_back,
             output_file=args.output
         )
-    
+        # ───────────────────────────────────────────────────────────────────
+
     # Final Summary
     print("\n" + "="*80)
     print(" ENHANCED TOOL EXECUTION SUMMARY")
     print("="*80)
-    final_status = 0  # 0 for success, 1 for failure
-    
+    final_status = 0
+
     if args.mode in ['train', 'both']:
         status_msg = '✅ SUCCESS' if training_success else '❌ FAILED'
         print(f"Enhanced Training: {status_msg}")
@@ -324,9 +342,8 @@ def main():
             print("  ✓ Enhanced model trained on spatial data")
         if not training_success:
             final_status = 1
-    
+
     if args.mode in ['map', 'both']:
-        # Check if mapping was skipped due to training failure
         if args.mode == 'both' and not training_success:
             print("Enhanced Mapping:  SKIPPED due to training failure")
         else:
@@ -335,12 +352,14 @@ def main():
             if mapping_success:
                 print("  ✓ High-resolution point analysis")
                 print("  ✓ Area-aware feature extraction")
+                if args.years_back > 0:
+                    print(f"  ✓ Historical analysis ({args.years_back} years back)")
                 print("  ✓ Interactive probability map generated")
             if not mapping_success:
                 final_status = 1
-    
+
     print("="*80)
-    
+
     if final_status != 0:
         print("\nOne or more critical steps failed. Please review the logs above for errors.")
     else:
@@ -349,9 +368,11 @@ def main():
         print("  • Area highlighting for precise training data")
         print("  • Enhanced feature extraction from highlighted regions")
         print("  • Better model accuracy through spatial awareness")
-        print("  • Simplified workflow without complex historical analysis")
-    
+        if args.years_back > 0:
+            print(f"  • Historical temporal analysis ({args.years_back} years)")
+
     sys.exit(final_status)
+
 
 if __name__ == "__main__":
     main()
