@@ -48,8 +48,8 @@ SEASONAL_STATS_FILE = os.path.join(SEASONAL_DIR, 'seasonal_statistics.csv')
 EE_HIGH_VOLUME_URL = 'https://earthengine-highvolume.googleapis.com'
 
 # Image parameters
-DEFAULT_IMAGE_DIM = 512
-DEFAULT_MAP_IMAGE_DIM = 800
+DEFAULT_IMAGE_DIM = 1024
+DEFAULT_MAP_IMAGE_DIM = 1024
 DEFAULT_BUFFER_METERS = 1500
 
 # ── Satellite collections ─────────────────────────────────────────────────────

@@ -1,0 +1,54 @@
+\contentsline {section}{\numberline {1}Introduction: The Problem This Solves}{3}{section.1}%
+\contentsline {subsection}{\numberline {1.1}What is Riverine Sand Mining?}{3}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Why Can't We Just Drive Around and Check?}{3}{subsection.1.2}%
+\contentsline {subsection}{\numberline {1.3}What This System Does Instead}{3}{subsection.1.3}%
+\contentsline {section}{\numberline {2}The Satellite Data: What We See from Space}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Primary Sensor: Sentinel-2}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Backup Sensors}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Cloud Cover Handling}{4}{subsection.2.3}%
+\contentsline {section}{\numberline {3}Spectral Indices: Turning Pixels into Information}{4}{section.3}%
+\contentsline {subsection}{\numberline {3.1}The Six Core Indices}{4}{subsection.3.1}%
+\contentsline {subsubsection}{\numberline {3.1.1}NDVI --- Normalised Difference Vegetation Index}{4}{subsubsection.3.1.1}%
+\contentsline {subsubsection}{\numberline {3.1.2}NDWI --- Normalised Difference Water Index}{5}{subsubsection.3.1.2}%
+\contentsline {subsubsection}{\numberline {3.1.3}MNDWI --- Modified NDWI}{5}{subsubsection.3.1.3}%
+\contentsline {subsubsection}{\numberline {3.1.4}BSI --- Bare Soil Index}{5}{subsubsection.3.1.4}%
+\contentsline {subsubsection}{\numberline {3.1.5}NDBI --- Normalised Difference Built-up Index}{5}{subsubsection.3.1.5}%
+\contentsline {subsubsection}{\numberline {3.1.6}NDTI --- Normalised Difference Turbidity Index}{5}{subsubsection.3.1.6}%
+\contentsline {section}{\numberline {4}The Historical Feature Innovation}{6}{section.4}%
+\contentsline {subsection}{\numberline {4.1}The Core Idea}{6}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}How the Temporal Features Are Computed}{6}{subsection.4.2}%
+\contentsline {section}{\numberline {5}Image-Level Features: What the Photo Looks Like}{6}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Colour Statistics}{7}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}GLCM Texture Features}{7}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Local Binary Pattern (LBP)}{7}{subsection.5.3}%
+\contentsline {subsection}{\numberline {5.4}Edge Detection}{7}{subsection.5.4}%
+\contentsline {section}{\numberline {6}The Machine Learning Model}{7}{section.6}%
+\contentsline {subsection}{\numberline {6.1}What the Model Does}{7}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Training the Model}{8}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}Six Models Are Trained and Compared}{8}{subsection.6.3}%
+\contentsline {subsection}{\numberline {6.4}How the Best Model Is Chosen}{8}{subsection.6.4}%
+\contentsline {subsection}{\numberline {6.5}Current Model Performance (Damodar Pilot)}{9}{subsection.6.5}%
+\contentsline {section}{\numberline {7}The Complete Pipeline: Step by Step}{9}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Overview}{9}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Step 1: Generating Sample Points from a Shapefile}{9}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}Step 2: Downloading Satellite Images}{9}{subsection.7.3}%
+\contentsline {subsection}{\numberline {7.4}Step 3: Expert Labeling via the GUI}{10}{subsection.7.4}%
+\contentsline {subsection}{\numberline {7.5}Step 4: Feature Extraction with Historical Data}{10}{subsection.7.5}%
+\contentsline {subsection}{\numberline {7.6}Step 5: Probability Mapping}{11}{subsection.7.6}%
+\contentsline {subsection}{\numberline {7.7}Step 6: Output Generation}{11}{subsection.7.7}%
+\contentsline {section}{\numberline {8}Resolution and Coverage}{11}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Spatial Resolution Hierarchy}{11}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}Image Chip Coverage}{11}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}Temporal Resolution}{11}{subsection.8.3}%
+\contentsline {section}{\numberline {9}Scaling to All-India}{12}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Current Status}{12}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}Estimated National Scale}{12}{subsection.9.2}%
+\contentsline {section}{\numberline {10}Known Limitations and Future Work}{12}{section.10}%
+\contentsline {subsection}{\numberline {10.1}Current Limitations}{12}{subsection.10.1}%
+\contentsline {subsection}{\numberline {10.2}Planned Upgrades}{13}{subsection.10.2}%
+\contentsline {section}{\numberline {11}How to Run the System}{13}{section.11}%
+\contentsline {subsection}{\numberline {11.1}Prerequisites}{13}{subsection.11.1}%
+\contentsline {subsection}{\numberline {11.2}Authentication}{13}{subsection.11.2}%
+\contentsline {subsection}{\numberline {11.3}Running the Full Pipeline}{13}{subsection.11.3}%
+\contentsline {subsection}{\numberline {11.4}Key Arguments}{14}{subsection.11.4}%
+\contentsline {section}{\numberline {12}Summary}{14}{section.12}%

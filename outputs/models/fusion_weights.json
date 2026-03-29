@@ -1,0 +1,14 @@
+{
+  "weights": [
+    0.1,
+    0.1,
+    0.8
+  ],
+  "timestamp": "2026-03-20 18:42",
+  "metrics": {
+    "f1": 1.0,
+    "auc": 0.0,
+    "n_validation": 17,
+    "n_mining": 17
+  }
+}
