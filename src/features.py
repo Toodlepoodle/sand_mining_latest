@@ -6,7 +6,7 @@ Enhanced feature extraction module focusing on highlighted areas for sand mining
 import os
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw
 from skimage.feature import graycomatrix, graycoprops
 from skimage.color import rgb2gray
 from skimage.measure import shannon_entropy
@@ -196,6 +196,171 @@ def extract_area_features(image_path, bbox, feature_prefix="area"):
         print(f"Error extracting area features: {e}")
         return {}
 
+def polygon_to_mask(polygon, height, width):
+    """
+    Rasterize a free-hand polygon (list of [x, y] image-pixel points) into a
+    boolean mask of shape (height, width).
+
+    Returns a boolean numpy array, or None if the polygon is invalid.
+    """
+    try:
+        if not polygon or len(polygon) < 3:
+            return None
+        mask_img = Image.new('L', (width, height), 0)
+        pts = [(float(p[0]), float(p[1])) for p in polygon]
+        ImageDraw.Draw(mask_img).polygon(pts, outline=1, fill=1)
+        return np.array(mask_img, dtype=bool)
+    except Exception:
+        return None
+
+def build_type_masks(annotations, height, width):
+    """
+    Pool ALL annotation polygons (or legacy bboxes) of each type into a single
+    combined boolean mask per type.
+
+    This is the key change: instead of extracting features separately for every
+    individual annotation, every region of the same type on an image is merged
+    into ONE mask, so a fixed, consistent feature set is produced per type.
+
+    Returns: dict {type_name: boolean mask (H, W)}
+    """
+    masks = {}
+    for ann in annotations:
+        t = ann.get('type', 'unknown')
+        m = None
+        poly = ann.get('polygon')
+        if poly and len(poly) >= 3:
+            m = polygon_to_mask(poly, height, width)
+        if m is None and ann.get('bbox'):       # legacy rectangle support
+            x1, y1, x2, y2 = ann['bbox']
+            m = np.zeros((height, width), dtype=bool)
+            x1 = max(0, min(width,  int(x1)));  x2 = max(0, min(width,  int(x2)))
+            y1 = max(0, min(height, int(y1)));  y2 = max(0, min(height, int(y2)))
+            if x2 > x1 and y2 > y1:
+                m[y1:y2, x1:x2] = True
+        if m is None:
+            continue
+        if t in masks:
+            masks[t] = masks[t] | m
+        else:
+            masks[t] = m
+    return masks
+
+def extract_region_features(image_path, mask, feature_prefix="region", _img_arr=None):
+    """
+    Extract features from an arbitrary masked region (pooled polygons of one
+    type). Mirrors extract_area_features but operates on a boolean mask instead
+    of a rectangular bbox, so free-hand shapes are supported.
+
+    Args:
+        image_path (str): path to image (used only if _img_arr not supplied)
+        mask (np.ndarray bool): region mask, shape (H, W)
+        feature_prefix (str): prefix for feature names (the annotation type)
+        _img_arr (np.ndarray, optional): preloaded RGB array to avoid re-reading
+
+    Returns:
+        dict of features for this region.
+    """
+    try:
+        if _img_arr is not None:
+            img_arr = _img_arr
+        else:
+            img_arr = np.array(Image.open(image_path).convert('RGB'))
+
+        if mask is None or mask.sum() < 9:   # too small to be meaningful
+            return {}
+
+        ys, xs = np.where(mask)
+        y1, y2 = ys.min(), ys.max() + 1
+        x1, x2 = xs.min(), xs.max() + 1
+
+        # Crop to the mask's bounding box for texture ops, and a local mask
+        crop      = img_arr[y1:y2, x1:x2]
+        local_msk = mask[y1:y2, x1:x2]
+        if crop.size == 0:
+            return {}
+
+        # Masked pixels (flat) for colour statistics
+        sel = crop[local_msk]              # (N, 3)
+        if sel.size == 0:
+            return {}
+
+        features = {}
+        epsilon = 1e-10
+
+        # ── Colour statistics over the exact masked pixels ──────────────────
+        for i, color in enumerate(['red', 'green', 'blue']):
+            channel = sel[:, i].astype(float)
+            features[f'{feature_prefix}_{color}_mean']     = np.mean(channel)
+            features[f'{feature_prefix}_{color}_std']      = np.std(channel)
+            features[f'{feature_prefix}_{color}_median']   = np.median(channel)
+            features[f'{feature_prefix}_{color}_range']    = np.max(channel) - np.min(channel)
+            features[f'{feature_prefix}_{color}_skewness'] = stats.skew(channel)
+            features[f'{feature_prefix}_{color}_kurtosis'] = stats.kurtosis(channel)
+
+        r = sel[:, 0].astype(float); g = sel[:, 1].astype(float); b = sel[:, 2].astype(float)
+        features[f'{feature_prefix}_rg_ratio']    = np.mean(r / (g + epsilon))
+        features[f'{feature_prefix}_rb_ratio']    = np.mean(r / (b + epsilon))
+        features[f'{feature_prefix}_gb_ratio']    = np.mean(g / (b + epsilon))
+        features[f'{feature_prefix}_br_ratio']    = np.mean(b / (r + epsilon))
+        features[f'{feature_prefix}_gr_ratio']    = np.mean(g / (r + epsilon))
+        features[f'{feature_prefix}_bg_ratio']    = np.mean(b / (g + epsilon))
+        features[f'{feature_prefix}_soil_index']  = np.mean((r + g) / (b + epsilon))
+        features[f'{feature_prefix}_water_index'] = np.mean(b / (r + g + epsilon))
+
+        # ── Texture over the cropped bbox (masked area dominates) ───────────
+        crop_gray = rgb2gray(crop)
+        if crop_gray.std() > 1e-5:
+            distances = [1, 2, 3]
+            angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]
+            crop_gray_uint8 = convert_to_uint8(crop_gray)
+            glcm = graycomatrix(crop_gray_uint8, distances=distances, angles=angles,
+                                levels=256, symmetric=True, normed=True)
+            for prop in ['contrast', 'dissimilarity', 'homogeneity',
+                         'energy', 'correlation', 'ASM']:
+                vals = graycoprops(glcm, prop)
+                features[f'{feature_prefix}_{prop}_mean'] = np.mean(vals)
+                features[f'{feature_prefix}_{prop}_std']  = np.std(vals)
+
+        # LBP
+        radius = 2; n_points = 8 * radius
+        crop_gray_uint8 = convert_to_uint8(crop_gray)
+        lbp = local_binary_pattern(crop_gray_uint8, n_points, radius, method='uniform')
+        hist, _ = np.histogram(lbp.ravel(), bins=n_points + 2,
+                               range=(0, n_points + 2), density=True)
+        features[f'{feature_prefix}_lbp_uniformity'] = np.max(hist)
+        features[f'{feature_prefix}_lbp_entropy']    = shannon_entropy(hist)
+        features[f'{feature_prefix}_lbp_contrast']   = np.sum((np.arange(len(hist)) - np.mean(hist))**2 * hist)
+
+        # Edges
+        edge_sobel = sobel(crop_gray)
+        features[f'{feature_prefix}_edge_density']  = np.mean(edge_sobel > 0.1)
+        features[f'{feature_prefix}_edge_strength'] = np.mean(edge_sobel)
+        features[f'{feature_prefix}_edge_max']      = np.max(edge_sobel)
+        features[f'{feature_prefix}_edge_std']      = np.std(edge_sobel)
+
+        # ── Shape / size of the pooled region (true polygon area, not bbox) ──
+        region_pixels = int(mask.sum())
+        bbox_h = int(y2 - y1); bbox_w = int(x2 - x1)
+        features[f'{feature_prefix}_area_pixels']  = region_pixels
+        features[f'{feature_prefix}_aspect_ratio'] = bbox_w / max(bbox_h, 1)
+        features[f'{feature_prefix}_extent']       = region_pixels / max(bbox_w * bbox_h, 1)  # fill ratio
+        features[f'{feature_prefix}_entropy']      = shannon_entropy(crop_gray)
+        features[f'{feature_prefix}_brightness']   = float(np.mean(np.sum(sel, axis=1)))
+        features[f'{feature_prefix}_vegetation_index'] = float(np.mean((g > r) & (g > b)))
+
+        # Local roughness inside the crop
+        from scipy.ndimage import generic_filter
+        local_std = generic_filter(crop_gray, np.std, size=5)
+        features[f'{feature_prefix}_local_std_mean']     = np.mean(local_std)
+        features[f'{feature_prefix}_local_std_max']      = np.max(local_std)
+        features[f'{feature_prefix}_surface_roughness']  = np.std(local_std)
+
+        return features
+    except Exception as e:
+        print(f"Error extracting region features ({feature_prefix}): {e}")
+        return {}
+
 def extract_enhanced_features(image_path):
     """
     Extract enhanced features from an image, focusing on highlighted areas.
@@ -218,55 +383,49 @@ def extract_enhanced_features(image_path):
         global_features.update(extract_texture_features(image_path))
         global_features.update(extract_advanced_features(image_path))
         
-        # Extract features from highlighted areas
+        # Extract features from highlighted areas.
+        # CHANGED: all regions of the same type are POOLED into a single mask,
+        # producing ONE consistent feature set per type (e.g. sand_mining_*),
+        # instead of separate per-annotation columns (sand_mining_0_*, _1_* ...).
         area_features = {}
-        
+
+        # Known annotation types — always emit the same columns so the feature
+        # vector length is identical across every image (and at map time).
+        KNOWN_TYPES = ['sand_mining', 'equipment', 'water_disturbance', 'no_mining']
+
         if annotations:
-            for i, annotation in enumerate(annotations):
-                annotation_type = annotation.get('type', 'unknown')
-                bbox = annotation.get('bbox', [])
-                
-                if len(bbox) == 4:
-                    # Extract features from this specific area
-                    prefix = f"{annotation_type}_{i}"
-                    area_feats = extract_area_features(image_path, bbox, prefix)
-                    area_features.update(area_feats)
-            
-            # Summary statistics across all sand mining areas
-            sand_mining_areas = [ann for ann in annotations if ann['type'] == 'sand_mining']
-            if sand_mining_areas:
-                area_features['num_sand_mining_areas'] = len(sand_mining_areas)
-                
-                # Calculate total area of sand mining
-                total_mining_area = 0
-                for ann in sand_mining_areas:
-                    bbox = ann['bbox']
-                    area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                    total_mining_area += area
-                area_features['total_mining_area'] = total_mining_area
-                
-                # Mining area density (relative to image size)
-                img = Image.open(image_path)
-                total_image_area = img.width * img.height
-                area_features['mining_area_ratio'] = total_mining_area / total_image_area
-            
-            # Equipment areas
-            equipment_areas = [ann for ann in annotations if ann['type'] == 'equipment']
-            if equipment_areas:
-                area_features['num_equipment_areas'] = len(equipment_areas)
-                total_equipment_area = sum((ann['bbox'][2] - ann['bbox'][0]) * (ann['bbox'][3] - ann['bbox'][1]) 
-                                         for ann in equipment_areas)
-                area_features['total_equipment_area'] = total_equipment_area
-            
-            # Water disturbance areas
-            water_areas = [ann for ann in annotations if ann['type'] == 'water_disturbance']
-            if water_areas:
-                area_features['num_water_disturbance_areas'] = len(water_areas)
-                total_water_area = sum((ann['bbox'][2] - ann['bbox'][0]) * (ann['bbox'][3] - ann['bbox'][1]) 
-                                     for ann in water_areas)
-                area_features['total_water_disturbance_area'] = total_water_area
+            img_arr_full = np.array(Image.open(image_path).convert('RGB'))
+            H, W = img_arr_full.shape[:2]
+            type_masks = build_type_masks(annotations, H, W)
+
+            total_image_area = float(H * W)
+
+            for t in KNOWN_TYPES:
+                mask = type_masks.get(t)
+                if mask is not None and mask.sum() >= 9:
+                    feats = extract_region_features(
+                        image_path, mask, feature_prefix=t, _img_arr=img_arr_full
+                    )
+                    area_features.update(feats)
+                    n_regions = sum(1 for a in annotations if a.get('type') == t)
+                    area_features[f'num_{t}_areas']   = n_regions
+                    area_features[f'total_{t}_area']  = int(mask.sum())
+                    area_features[f'{t}_area_ratio']  = mask.sum() / max(total_image_area, 1)
+                else:
+                    area_features[f'num_{t}_areas']   = 0
+                    area_features[f'total_{t}_area']   = 0
+                    area_features[f'{t}_area_ratio']   = 0.0
+
+            # Backward-compatible aliases used elsewhere in the codebase
+            area_features['num_sand_mining_areas'] = area_features.get('num_sand_mining_areas', 0)
+            area_features['total_mining_area']     = area_features.get('total_sand_mining_area', 0)
+            area_features['mining_area_ratio']     = area_features.get('sand_mining_area_ratio', 0.0)
+            area_features['num_equipment_areas']   = area_features.get('num_equipment_areas', 0)
+            area_features['total_equipment_area']  = area_features.get('total_equipment_area', 0)
+            area_features['num_water_disturbance_areas']   = area_features.get('num_water_disturbance_areas', 0)
+            area_features['total_water_disturbance_area']  = area_features.get('total_water_disturbance_area', 0)
         else:
-            # No annotations - set area features to zero
+            # No annotations - set summary area features to zero
             area_features.update({
                 'num_sand_mining_areas': 0,
                 'total_mining_area': 0,

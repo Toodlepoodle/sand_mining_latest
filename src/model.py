@@ -458,6 +458,131 @@ def load_model_and_metadata():
         return None, None, None
 
 
+def _discover_rivers():
+    """Find every river that has labels saved, by scanning for training_labels_*.csv."""
+    import glob
+    rivers = []
+    pattern = os.path.join(config.OUTPUT_DIR, 'training_labels_*.csv')
+    for path in glob.glob(pattern):
+        name = os.path.basename(path)[len('training_labels_'):-len('.csv')]
+        rivers.append(name)
+    return sorted(rivers)
+
+
+def build_all_river_features(years_back=0):
+    """
+    Pool labeled data from EVERY river into one feature DataFrame.
+
+    For each river it temporarily points config at that river's images, labels
+    and annotations, extracts features (identically to single-river training),
+    tags them with a 'river' column, then concatenates everything.
+    """
+    rivers = _discover_rivers()
+    if not rivers:
+        print("No per-river label files found (training_labels_<river>.csv).")
+        return pd.DataFrame()
+
+    print(f"\n[All-River] Found {len(rivers)} rivers: {', '.join(rivers)}")
+
+    # Remember base paths so we can restore them
+    base_images = os.path.join(config.OUTPUT_DIR, 'training_images')
+    saved = (config.TRAINING_IMAGES_DIR, config.LABELS_FILE, config.ANNOTATIONS_FILE)
+
+    frames = []
+    for river in rivers:
+        config.TRAINING_IMAGES_DIR = os.path.join(base_images, river)
+        config.LABELS_FILE = os.path.join(config.OUTPUT_DIR, f'training_labels_{river}.csv')
+        config.ANNOTATIONS_FILE = os.path.join(config.ANNOTATIONS_DIR,
+                                                f'area_annotations_{river}.json')
+
+        labels = load_labels()
+        labeled = {k: v for k, v in labels.items() if v != -1}
+        if not labeled:
+            print(f"  {river}: no labeled images, skipping")
+            continue
+
+        labels_df = pd.DataFrame(list(labeled.items()), columns=['filename', 'label'])
+        if years_back and years_back > 0:
+            fdf = features.extract_features_from_df_with_history(
+                config.TRAINING_IMAGES_DIR, labels_df,
+                years_back=years_back,
+                buffer_m=getattr(config, 'DEFAULT_BUFFER_METERS', 1500))
+        else:
+            fdf = features.extract_features_from_df(config.TRAINING_IMAGES_DIR, labels_df)
+
+        if not fdf.empty:
+            fdf['river'] = river
+            frames.append(fdf)
+            print(f"  {river}: {len(fdf)} samples")
+
+    # Restore base paths
+    config.TRAINING_IMAGES_DIR, config.LABELS_FILE, config.ANNOTATIONS_FILE = saved
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True, sort=False).fillna(0)
+    print(f"[All-River] Combined dataset: {len(combined)} samples, "
+          f"{len(combined.columns) - 3} features")
+    return combined
+
+
+def run_all_river_training(use_grid_search=False, model_type='random_forest',
+                           use_multiple_models=True, years_back=0):
+    """
+    Train a SEPARATE global 'all-river' model on the pooled data of every river.
+    Saved under MODELS_DIR/_ALL_RIVERS/ so it never overwrites per-river models.
+    The good features (importances) from this global model are written alongside.
+    """
+    print("\n" + "="*80)
+    print(" TRAINING ALL-RIVER (GLOBAL) MODEL")
+    print("="*80 + "\n")
+
+    combined = build_all_river_features(years_back=years_back)
+    if combined.empty:
+        print("❌ No data to train all-river model.")
+        return False
+
+    feature_df = combined.drop(columns=[c for c in ['river'] if c in combined.columns])
+    X, y, feature_names = prepare_training_data(feature_df)
+    if X is None:
+        print("❌ Failed to prepare all-river training data.")
+        return False
+
+    if use_multiple_models:
+        model, model_results, feature_importance, all_models, scaler = train_multiple_models(
+            X, y, feature_names, test_size=config.TEST_SIZE, random_state=config.RANDOM_STATE)
+    else:
+        model, scaler, feature_importance = train_model(
+            X, y, feature_names, model_type=model_type, use_grid_search=use_grid_search)
+        all_models, model_results = None, None
+
+    # Save into a dedicated directory
+    out_dir = os.path.join(config.MODELS_DIR, '_ALL_RIVERS')
+    os.makedirs(out_dir, exist_ok=True)
+    joblib.dump(model,  os.path.join(out_dir, 'sand_mining_model.joblib'))
+    joblib.dump(scaler, os.path.join(out_dir, 'feature_scaler.joblib'))
+    with open(os.path.join(out_dir, 'feature_names.json'), 'w') as f:
+        json.dump(feature_names, f, indent=2)
+    with open(os.path.join(out_dir, 'feature_importance.json'), 'w') as f:
+        json.dump(feature_importance, f, indent=2)
+    if model_results is not None and not model_results.empty:
+        model_results.to_csv(os.path.join(out_dir, 'model_comparison_results.csv'), index=False)
+
+    # Rank and persist the "good features" so the global model can be refined
+    if feature_importance:
+        good = {k: v for k, v in sorted(feature_importance.items(),
+                                        key=lambda x: x[1], reverse=True) if v > 0}
+        with open(os.path.join(out_dir, 'good_features.json'), 'w') as f:
+            json.dump(good, f, indent=2)
+        print(f"\nTop global features:")
+        for k, v in list(good.items())[:12]:
+            print(f"  {v:.4f}  {k}")
+
+    print(f"\n✅ All-river global model saved to: {out_dir}")
+    return True
+
+
 def run_training_workflow(use_grid_search=False, model_type='random_forest',
                           use_multiple_models=False):
     """Run the complete model training workflow."""

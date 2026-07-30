@@ -200,41 +200,21 @@ class SandMiningProbabilityMapper:
             start_date_ee_narrow = ee.Date(start_dt_narrow)
             end_date_ee = ee.Date(end_dt)
             
-            # Get the best image within this narrow window
+            # ── STREAMLINED multi-source acquisition ────────────────────────
+            # Single entry point tries S2 → Landsat 9/8/7/5 → Sentinel-1 SAR
+            # → VIIRS and returns the matching RGB visualization params.
             best_image = ee_utils.get_best_s2_image(region, start_date_ee_narrow, end_date_ee)
-            
+            vis_params = {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000, 'gamma': 1.4}
+
             if best_image is None:
-                # If nothing found in the narrow window, broaden search slightly
+                # Broaden window and let the unified fetcher walk every source
                 start_dt_broad = latest_dt - timedelta(days=45)
                 start_date_ee_broad = ee.Date(start_dt_broad)
-                
-                best_image = ee_utils.get_best_s2_image(region, start_date_ee_broad, end_date_ee, max_cloud_cover=50)
-            
-            # Try Landsat if Sentinel-2 not available
-            if best_image is None:
-                landsat_image, collection_id = ee_utils.get_best_landsat_image(
-                    region, start_date_ee_broad, end_date_ee, max_cloud_cover=60
+                best_image, source_id, vis_params = ee_utils.get_best_image_any(
+                    region, start_date_ee_broad, end_date_ee, max_cloud_cover=50
                 )
-                
-                if landsat_image is not None:
-                    best_image = landsat_image
-                    # Adjust parameters for Landsat visualization
-                    vis_params = {
-                        'bands': ['SR_B4', 'SR_B3', 'SR_B2'],  # RGB for Landsat
-                        'min': 0,
-                        'max': 3000,
-                        'gamma': 1.4
-                    }
-                else:
-                    return None  # Skip this point if no image available
-            else:
-                # Default visualization for Sentinel-2
-                vis_params = {
-                    'bands': ['B4', 'B3', 'B2'],  # RGB
-                    'min': 0,
-                    'max': 3000,
-                    'gamma': 1.4
-                }
+                if best_image is None:
+                    return None  # no imagery from any source
             
             # Get actual date of the image used
             try:

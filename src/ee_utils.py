@@ -292,6 +292,15 @@ def get_best_landsat_image(region, start_date, end_date, max_cloud_cover=35):
     if l89_count > 0:
         return ee.Image(l89_collection.first()), 'LANDSAT/LC09/C02/T1_L2'
     
+    # If no L8-9 images, check Landsat 8 (LC08) explicitly
+    l8_collection = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2') \
+        .filterBounds(region) \
+        .filterDate(start_date, end_date) \
+        .filter(ee.Filter.lt('CLOUD_COVER', max_cloud_cover)) \
+        .sort('CLOUD_COVER')
+    if l8_collection.size().getInfo() > 0:
+        return ee.Image(l8_collection.first()), 'LANDSAT/LC08/C02/T1_L2'
+
     # If no L8-9 images, check Landsat 7 (older but widely used)
     l7_collection = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2') \
         .filterBounds(region) \
@@ -303,6 +312,15 @@ def get_best_landsat_image(region, start_date, end_date, max_cloud_cover=35):
     
     if l7_count > 0:
         return ee.Image(l7_collection.first()), 'LANDSAT/LE07/C02/T1_L2'
+
+    # Landsat 5 (TM) — extends history back to 1984
+    l5_collection = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2') \
+        .filterBounds(region) \
+        .filterDate(start_date, end_date) \
+        .filter(ee.Filter.lt('CLOUD_COVER', max_cloud_cover)) \
+        .sort('CLOUD_COVER')
+    if l5_collection.size().getInfo() > 0:
+        return ee.Image(l5_collection.first()), 'LANDSAT/LT05/C02/T1_L2'
     
     # Try with higher cloud tolerance for Landsat 8-9
     l89_wide_collection = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2') \
@@ -342,6 +360,80 @@ def get_best_viirs_image(region, start_date, end_date):
         return ee.Image(viirs_collection.sort('system:time_start', False).first())
     
     return None
+
+def get_best_sentinel1_image(region, start_date, end_date):
+    """
+    Sentinel-1 SAR (all-weather, cloud-penetrating) fallback. Useful for
+    monsoon dates where every optical sensor is clouded out. Returns a
+    VV/VH composite image, or None.
+    """
+    try:
+        s1 = (ee.ImageCollection('COPERNICUS/S1_GRD')
+              .filterBounds(region)
+              .filterDate(start_date, end_date)
+              .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+              .filter(ee.Filter.eq('instrumentMode', 'IW'))
+              .sort('system:time_start', False))
+        if s1.size().getInfo() > 0:
+            return ee.Image(s1.first())
+    except Exception:
+        pass
+    return None
+
+
+# Visualization presets per source so every caller renders RGB consistently.
+SOURCE_VIS = {
+    'COPERNICUS/S2_SR_HARMONIZED': {'bands': ['B4', 'B3', 'B2'], 'min': 0, 'max': 3000, 'gamma': 1.4},
+    'LANDSAT/LC09/C02/T1_L2':      {'bands': ['SR_B4', 'SR_B3', 'SR_B2'], 'min': 0, 'max': 30000, 'gamma': 1.4},
+    'LANDSAT/LC08/C02/T1_L2':      {'bands': ['SR_B4', 'SR_B3', 'SR_B2'], 'min': 0, 'max': 30000, 'gamma': 1.4},
+    'LANDSAT/LE07/C02/T1_L2':      {'bands': ['SR_B3', 'SR_B2', 'SR_B1'], 'min': 0, 'max': 30000, 'gamma': 1.4},
+    'LANDSAT/LT05/C02/T1_L2':      {'bands': ['SR_B3', 'SR_B2', 'SR_B1'], 'min': 0, 'max': 30000, 'gamma': 1.4},
+    'NOAA/VIIRS/001/VNP09GA':      {'bands': ['M5', 'M4', 'M3'], 'min': 0, 'max': 0.3},
+    'COPERNICUS/S1_GRD':           {'bands': ['VV', 'VH', 'VV'], 'min': -25, 'max': 0},
+}
+
+
+def get_best_image_any(region, start_date, end_date,
+                       max_cloud_cover=35, allow_sar=True, allow_viirs=True):
+    """
+    STREAMLINED single entry point for imagery.
+
+    Tries every external image source in quality order and returns the first
+    that yields data:
+        Sentinel-2  →  Landsat 9 / 8 / 7 / 5  →  Sentinel-1 SAR  →  VIIRS
+
+    Returns:
+        tuple (ee.Image | None, source_id | None, vis_params dict)
+    Callers no longer need to chain get_best_s2_image / get_best_landsat_image
+    themselves — just call this.
+    """
+    # 1. Sentinel-2 (best resolution / spectral)
+    img = get_best_s2_image(region, start_date, end_date, max_cloud_cover)
+    if img is not None:
+        sid = 'COPERNICUS/S2_SR_HARMONIZED'
+        return img, sid, SOURCE_VIS[sid]
+
+    # 2. Landsat family (9 → 8 → 7 → 5, handled inside)
+    limg, lid = get_best_landsat_image(region, start_date, end_date, max_cloud_cover)
+    if limg is not None:
+        return limg, lid, SOURCE_VIS.get(lid, SOURCE_VIS['LANDSAT/LC09/C02/T1_L2'])
+
+    # 3. Sentinel-1 SAR (all-weather)
+    if allow_sar:
+        simg = get_best_sentinel1_image(region, start_date, end_date)
+        if simg is not None:
+            sid = 'COPERNICUS/S1_GRD'
+            return simg, sid, SOURCE_VIS[sid]
+
+    # 4. VIIRS (coarse, last resort)
+    if allow_viirs:
+        vimg = get_best_viirs_image(region, start_date, end_date)
+        if vimg is not None:
+            sid = 'NOAA/VIIRS/001/VNP09GA'
+            return vimg, sid, SOURCE_VIS[sid]
+
+    return None, None, {}
+
 
 def download_satellite_image(image, region, output_path, img_dim=512):
     """

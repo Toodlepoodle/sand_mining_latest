@@ -48,9 +48,12 @@ class LabelingGUI:
                 self.labels[img_file] = -1
 
         # ── Drawing state ──────────────────────────────────────────────────
-        self.drawing = False
-        self.draw_start = None
-        self.current_rect = None
+        # Free-hand polygon drawing (no longer limited to rectangles)
+        self.drawing       = False
+        self.draw_start    = None
+        self.current_rect  = None          # kept for backward compatibility
+        self.current_points = []           # canvas-space points of polygon in progress
+        self.current_line  = None          # canvas item id for the live polyline
         self.annotation_type = 'sand_mining'  # default draw type
         self.annotation_mode = True           # ON by default now
 
@@ -244,26 +247,40 @@ class LabelingGUI:
 
         img_resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
 
-        # Draw existing annotation boxes on the image
-        # Boxes stored in original image pixel coords — scale only (NO canvas offset)
+        # Draw existing annotations on the image.
+        # Annotations are stored in original image pixel coords — scale only.
+        # Supports free-hand polygons ('polygon' key) AND legacy boxes ('bbox').
         img_draw = img_resized.copy()
         draw = ImageDraw.Draw(img_draw, 'RGBA')
         img_file = self.image_files[self.current_index]
+        s = self._scale
         for ann in self.annotations.get(img_file, []):
-            s  = self._scale
-            ib = ann['bbox']
-            bx = [int(ib[0]*s), int(ib[1]*s), int(ib[2]*s), int(ib[3]*s)]
-            bx[0] = max(0, min(nw-1, bx[0]))
-            bx[1] = max(0, min(nh-1, bx[1]))
-            bx[2] = max(0, min(nw-1, bx[2]))
-            bx[3] = max(0, min(nh-1, bx[3]))
             col = self._type_color(ann['type'])
-            draw.rectangle(bx, outline=col, width=3)
-            tag_w = min(120, max(10, bx[2] - bx[0]))
-            tag_y2 = min(nh-1, bx[1] + 18)
-            draw.rectangle([bx[0], bx[1], bx[0]+tag_w, tag_y2],
-                           fill=(*self._hex_to_rgb(col), 180))
-            draw.text((bx[0]+4, bx[1]+2), ann['type'][:12], fill='white')
+            rgb = self._hex_to_rgb(col)
+            poly = ann.get('polygon')
+            if poly and len(poly) >= 3:
+                # Scale polygon points to display size
+                pts = [(max(0, min(nw - 1, int(px * s))),
+                        max(0, min(nh - 1, int(py * s)))) for px, py in poly]
+                draw.polygon(pts, outline=col, fill=(*rgb, 60))
+                draw.line(pts + [pts[0]], fill=col, width=3)
+                tx, ty = pts[0]
+                draw.rectangle([tx, ty, tx + min(120, 90), ty + 18],
+                               fill=(*rgb, 180))
+                draw.text((tx + 4, ty + 2), ann['type'][:12], fill='white')
+            elif ann.get('bbox'):
+                ib = ann['bbox']
+                bx = [int(ib[0] * s), int(ib[1] * s), int(ib[2] * s), int(ib[3] * s)]
+                bx[0] = max(0, min(nw - 1, bx[0]))
+                bx[1] = max(0, min(nh - 1, bx[1]))
+                bx[2] = max(0, min(nw - 1, bx[2]))
+                bx[3] = max(0, min(nh - 1, bx[3]))
+                draw.rectangle(bx, outline=col, width=3)
+                tag_w = min(120, max(10, bx[2] - bx[0]))
+                tag_y2 = min(nh - 1, bx[1] + 18)
+                draw.rectangle([bx[0], bx[1], bx[0] + tag_w, tag_y2],
+                               fill=(*rgb, 180))
+                draw.text((bx[0] + 4, bx[1] + 2), ann['type'][:12], fill='white')
 
         self._photo_ref = ImageTk.PhotoImage(img_draw)
         if self._image_id_on_canvas:
@@ -294,64 +311,78 @@ class LabelingGUI:
     def _update_type(self):
         self.annotation_type = self.type_var.get()
 
+    def _canvas_to_image(self, x, y):
+        """Convert a canvas-space point to image pixel coords, clamped to bounds."""
+        ox, oy = self._offset
+        scale  = self._scale
+        ix = int((x - ox) / scale)
+        iy = int((y - oy) / scale)
+        iw, ih = self.current_image_object.size
+        ix = max(0, min(iw, ix))
+        iy = max(0, min(ih, iy))
+        return ix, iy
+
     def on_mouse_press(self, event):
         # Only start drawing if scale/offset are initialised (image loaded)
         if not hasattr(self, '_scale') or not hasattr(self, '_offset'):
             return
-        self.drawing   = True
+        self.drawing = True
         self.draw_start = (event.x, event.y)
-        if self.current_rect:
-            self.canvas.delete(self.current_rect)
+        # Begin a new free-hand polygon
+        self.current_points = [(event.x, event.y)]
+        if self.current_line:
+            self.canvas.delete(self.current_line)
+            self.current_line = None
 
     def on_mouse_drag(self, event):
-        if not self.drawing or not self.draw_start:
+        if not self.drawing:
             return
-        if self.current_rect:
-            self.canvas.delete(self.current_rect)
+        # Record the freehand path and redraw the live outline
+        self.current_points.append((event.x, event.y))
+        if self.current_line:
+            self.canvas.delete(self.current_line)
         col = self._type_color(self.annotation_type)
-        self.current_rect = self.canvas.create_rectangle(
-            self.draw_start[0], self.draw_start[1],
-            event.x, event.y,
-            outline=col, width=2, dash=(4, 4)
-        )
+        if len(self.current_points) >= 2:
+            flat = [c for pt in self.current_points for c in pt]
+            self.current_line = self.canvas.create_line(
+                *flat, fill=col, width=2, smooth=True
+            )
 
     def on_mouse_release(self, event):
-        if not self.drawing or not self.draw_start:
+        if not self.drawing:
             return
         self.drawing = False
 
-        x1, y1 = self.draw_start
-        x2, y2 = event.x, event.y
+        if self.current_line:
+            self.canvas.delete(self.current_line)
+            self.current_line = None
 
-        if self.current_rect:
-            self.canvas.delete(self.current_rect)
-            self.current_rect = None
+        pts = self.current_points
+        self.current_points = []
 
-        # Ignore tiny accidental clicks
-        if abs(x2 - x1) < 10 or abs(y2 - y1) < 10:
+        # Need at least a small path to count as a region
+        if not pts or len(pts) < 3:
             return
 
-        # Normalise coordinates
-        x1, x2 = min(x1, x2), max(x1, x2)
-        y1, y2 = min(y1, y2), max(y1, y2)
+        # Convert all canvas points → image pixel coords
+        img_poly = [list(self._canvas_to_image(x, y)) for (x, y) in pts]
 
-        # Convert canvas coords → image pixel coords
-        ox, oy = self._offset
-        scale  = self._scale
-        img_bbox = [
-            int((x1 - ox) / scale),
-            int((y1 - oy) / scale),
-            int((x2 - ox) / scale),
-            int((y2 - oy) / scale),
-        ]
-        # Clamp to image bounds
-        iw, ih = self.current_image_object.size
-        img_bbox[0] = max(0, img_bbox[0])
-        img_bbox[1] = max(0, img_bbox[1])
-        img_bbox[2] = min(iw, img_bbox[2])
-        img_bbox[3] = min(ih, img_bbox[3])
+        # Drop consecutive duplicates
+        cleaned = [img_poly[0]]
+        for p in img_poly[1:]:
+            if p != cleaned[-1]:
+                cleaned.append(p)
+        img_poly = cleaned
+        if len(img_poly) < 3:
+            return
 
-        if img_bbox[2] <= img_bbox[0] or img_bbox[3] <= img_bbox[1]:
+        # Derive a bbox from the polygon (kept for backward compatibility)
+        xs = [p[0] for p in img_poly]
+        ys = [p[1] for p in img_poly]
+        img_bbox = [min(xs), min(ys), max(xs), max(ys)]
+
+        # Reject degenerate shapes
+        if (img_bbox[2] - img_bbox[0]) < 4 or (img_bbox[3] - img_bbox[1]) < 4:
             return
 
         img_file = self.image_files[self.current_index]
@@ -359,12 +390,12 @@ class LabelingGUI:
             self.annotations[img_file] = []
 
         self.annotations[img_file].append({
-            'type':        self.annotation_type,
-            'bbox':        img_bbox,           # image pixel coords
-            'canvas_bbox': [x1, y1, x2, y2],  # canvas coords for redraw
+            'type':    self.annotation_type,
+            'polygon': img_poly,    # free-hand polygon in image pixel coords
+            'bbox':    img_bbox,    # derived bbox (legacy compatibility)
         })
 
-        # Auto-set label if drawing sand_mining box and image is unlabeled
+        # Auto-set label if drawing a sand_mining region and image is unlabeled
         if self.annotation_type == 'sand_mining' and self.labels.get(img_file, -1) == -1:
             self.labels[img_file] = 1
 
@@ -432,9 +463,10 @@ class LabelingGUI:
         messagebox.showinfo("How to Label", """
 WORKFLOW (do both steps for best results):
 
-STEP 1 — Draw boxes on mining areas:
-  • Click and drag directly on the satellite image
-  • Draw a box tightly around the mining site
+STEP 1 — Draw regions on mining areas (free-hand):
+  • Click and drag to trace ANY shape around the area
+    (no longer limited to rectangles — draw the exact outline)
+  • Release the mouse to close the shape into a polygon
   • Use the radio buttons to select what you're drawing:
     🔴 Sand Mining  — active extraction pit or dredge
     🔵 Water Disturbance — turbid/disturbed water

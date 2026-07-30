@@ -18,8 +18,9 @@ from src import config
 from src import ee_utils
 from src.utils import ensure_directories, clean_temp_dir
 from src.gui import start_labeling_gui
-from src.model import run_training_workflow, load_model_and_metadata
+from src.model import run_training_workflow, load_model_and_metadata, run_all_river_training
 from src.mapper import run_mapping_workflow
+from src.mapper import SandMiningProbabilityMapper  # keep only this
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -28,12 +29,15 @@ def parse_arguments():
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
-        '--mode', type=str, required=True, choices=['train', 'map', 'both', 'label', 'full'],
+        '--mode', type=str, required=True,
+        choices=['train', 'map', 'both', 'label', 'full', 'all-river'],
         help="Operating mode:\n"
-             "  train - Download images, label them with area highlighting, and train model.\n"
-             "  map   - Create a probability map using an existing model.\n"
-             "  both  - Run training first, then create a map.\n"
-             "  label - Only run the image labeling and area annotation interface."
+             "  train     - Download images, label them, and train a per-river model.\n"
+             "  map       - Create a probability map using an existing model.\n"
+             "  both      - Run training first, then create a map.\n"
+             "  label     - Only run the image labeling and area annotation interface.\n"
+             "  full      - Three-layer fusion pipeline.\n"
+             "  all-river - Train a SEPARATE global model pooling every river's data."
     )
     parser.add_argument(
         '--shapefile', type=str, required=False,
@@ -107,7 +111,6 @@ def parse_arguments():
     # Validate required arguments based on mode
     if args.mode in ['train', 'map', 'both'] and not args.shapefile:
         parser.error(f"--shapefile is required for mode '{args.mode}'")
-
     return args
 
 
@@ -290,6 +293,16 @@ def main():
         run_enhanced_labeling()
         return
 
+    if args.mode == 'all-river':
+        # Train a separate global model across every river that has labels.
+        ok = run_all_river_training(
+            use_grid_search=args.use_grid_search,
+            model_type=args.model_type,
+            use_multiple_models=args.multiple_models or True,
+            years_back=args.years_back
+        )
+        sys.exit(0 if ok else 1)
+
     if args.mode in ['train', 'both']:
         # Download training images
         download_success = download_training_images(args)
@@ -416,8 +429,6 @@ def main():
         l2_probs   = run_weak_supervision_layer(coords, scraped_df)
 
         # ── Layer 3: Existing ML model ────────────────────────────────────
-        from src.mapper import run_mapping_workflow, SandMiningProbabilityMapper
-        from src.model import load_model_and_metadata
         model, scaler, feature_names = load_model_and_metadata()
         if model is None:
             print("❌ No trained model found. Run --mode train first.")

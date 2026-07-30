@@ -673,10 +673,145 @@ def scrape_prs_india():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Geocoding
+# SOURCE 16 — Nitter (Twitter/X mirrors)  — sand-mining tweets w/ place mentions
 # ══════════════════════════════════════════════════════════════════════════════
 
-def geocode_all(records):
+NITTER_INSTANCES = [
+    'https://nitter.net',
+    'https://nitter.poast.org',
+    'https://nitter.privacydev.net',
+    'https://nitter.lucabased.xyz',
+    'https://nitter.kavin.rocks',
+]
+
+NITTER_QUERIES = [
+    'illegal sand mining india',
+    'sand mafia river',
+    'riverbed sand mining',
+    'sand mining ngt',
+    'sand mining arrested river',
+]
+
+def scrape_nitter():
+    """
+    Scrape Twitter/X via Nitter mirrors (no API key needed).
+    Tries multiple instances until one responds, then mines tweet text for
+    Indian river/place mentions using the shared extract_locs() patterns.
+    """
+    if not BS4_OK:
+        return []
+    print("  [16] Nitter (Twitter/X mirrors)...")
+    results = []
+    for q in NITTER_QUERIES:
+        got = False
+        for inst in NITTER_INSTANCES:
+            if got:
+                break
+            url = f"{inst}/search?f=tweets&q={quote_plus(q)}"
+            data = _cached_get(url, ttl_hours=24)
+            if not data:
+                continue
+            try:
+                soup = BeautifulSoup(data['text'], 'html.parser')
+                tweets = soup.select('.tweet-content, .timeline-item')
+                if not tweets:
+                    continue
+                got = True
+                for tw in tweets[:25]:
+                    text = tw.get_text(' ', strip=True)
+                    if not text:
+                        continue
+                    low = text.lower()
+                    if 'sand' in low and ('min' in low or 'mafia' in low or 'dredg' in low):
+                        for loc in extract_locs(text):
+                            loc['confidence'] = 0.6   # social media = lower trust
+                            results.append(_text_rec(loc, 'Nitter', url))
+            except Exception:
+                continue
+        time.sleep(1.0)
+    print(f"      -> {len(results)} records")
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SOURCE 17 — GDELT  (global news event DB, geolocated)  — strong external source
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_gdelt():
+    """
+    GDELT DOC 2.0 API — worldwide news monitoring, returns matching articles as
+    JSON. We pull sand-mining articles mentioning India and mine their titles for
+    river/place names. No key required.
+    """
+    print("  [17] GDELT global news DB...")
+    results = []
+    queries = [
+        '"sand mining" india river',
+        '"illegal sand mining" india',
+        '"sand mafia" india',
+        'riverbed mining india',
+    ]
+    for q in queries:
+        url = ('https://api.gdeltproject.org/api/v2/doc/doc'
+               f'?query={quote_plus(q)}&mode=ArtList&format=json'
+               '&maxrecords=50&sort=DateDesc')
+        data = _cached_get(url, ttl_hours=24)
+        if not data:
+            continue
+        try:
+            payload = json.loads(data['text'])
+            for art in payload.get('articles', []):
+                text = (art.get('title', '') or '')
+                link = art.get('url', '')
+                if 'sand' in text.lower():
+                    for loc in extract_locs(text):
+                        loc['confidence'] = 0.75
+                        results.append(_text_rec(loc, 'GDELT', link))
+        except Exception:
+            pass
+        time.sleep(1.0)
+    print(f"      -> {len(results)} records")
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SOURCE 18 — Extra Indian news outlets (Mongabay, The Wire, Scroll,
+#             Indian Express, Hindustan Times, New Indian Express)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_extra_news():
+    """Additional environment/news outlets that frequently cover river sand mining."""
+    if not BS4_OK:
+        return []
+    print("  [18] Extra news outlets (Mongabay/TheWire/Scroll/IE/HT)...")
+    results = []
+    outlets = [
+        ('Mongabay',       'https://india.mongabay.com/?s=sand+mining'),
+        ('Mongabay',       'https://india.mongabay.com/list/environment/sand-mining/'),
+        ('TheWire',        'https://thewire.in/?s=sand+mining'),
+        ('Scroll',         'https://scroll.in/search?q=sand%20mining'),
+        ('IndianExpress',  'https://indianexpress.com/?s=illegal+sand+mining'),
+        ('HindustanTimes', 'https://www.hindustantimes.com/topic/sand-mining'),
+        ('NewIndianExpress','https://www.newindianexpress.com/topic/Sand_mining'),
+    ]
+    for name, url in outlets:
+        data = _cached_get(url)
+        if not data:
+            continue
+        try:
+            text = BeautifulSoup(data['text'], 'html.parser').get_text(' ')
+            if 'sand mining' in text.lower() or 'riverbed' in text.lower():
+                for loc in extract_locs(text):
+                    loc['confidence'] = 0.7
+                    results.append(_text_rec(loc, name, url))
+        except Exception:
+            pass
+        time.sleep(1.0)
+    print(f"      -> {len(results)} records")
+    return results
+
+
+
     needs = [r for r in records if not r.get('lat')]
     has   = [r for r in records if r.get('lat')]
     print(f"\n  Geocoding {len(needs)} text mentions (~{len(needs)} sec)...")
@@ -745,7 +880,7 @@ def run_scraper(river_name=None, state=None, use_cache=True):
         return df
 
     print("\n" + "="*60)
-    print("  SAND MINING DATA AGGREGATION — 15 SOURCES")
+    print("  SAND MINING DATA AGGREGATION — 18 SOURCES")
     print("="*60)
     t0 = time.time()
 
@@ -765,6 +900,9 @@ def run_scraper(river_name=None, state=None, use_cache=True):
     all_recs += scrape_ngt()
     all_recs += scrape_data_gov_in()
     all_recs += scrape_prs_india()
+    all_recs += scrape_nitter()
+    all_recs += scrape_gdelt()
+    all_recs += scrape_extra_news()
 
     print(f"\n  Raw records: {len(all_recs)}")
     all_recs = geocode_all(all_recs)
