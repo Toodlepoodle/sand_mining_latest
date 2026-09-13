@@ -20,6 +20,51 @@ import branca.colormap as cm
 
 from src import config
 
+def load_checkpoint(checkpoint_file):
+    """
+    Load a JSON checkpoint file used to resume long-running loops
+    (feature extraction, mapping, geocoding, downloads).
+
+    Returns:
+        dict: checkpoint contents, or {'completed': [], 'results': []} if none exists.
+    """
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, 'r') as f:
+                data = json.load(f)
+            n = len(data.get('completed', []))
+            print(f"[Checkpoint] Resuming from {checkpoint_file} ({n} items already done)")
+            return data
+        except Exception as e:
+            print(f"[Checkpoint] Warning: could not read {checkpoint_file}: {e}. Starting fresh.")
+    return {'completed': [], 'results': []}
+
+
+def save_checkpoint(checkpoint_file, data):
+    """
+    Persist a checkpoint dict to disk atomically (write to temp file then rename)
+    so a crash mid-write never corrupts the checkpoint.
+    """
+    try:
+        os.makedirs(os.path.dirname(checkpoint_file), exist_ok=True)
+        tmp_file = checkpoint_file + '.tmp'
+        with open(tmp_file, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp_file, checkpoint_file)
+    except Exception as e:
+        print(f"[Checkpoint] Warning: could not save {checkpoint_file}: {e}")
+
+
+def clear_checkpoint(checkpoint_file):
+    """Remove a checkpoint file once a run completes successfully."""
+    try:
+        if os.path.exists(checkpoint_file):
+            os.remove(checkpoint_file)
+            print(f"[Checkpoint] Cleared {checkpoint_file} (run completed).")
+    except Exception as e:
+        print(f"[Checkpoint] Warning: could not clear {checkpoint_file}: {e}")
+
+
 def ensure_directories():
     """
     Ensure all required directories exist.

@@ -21,7 +21,9 @@ from src import config
 from src import ee_utils
 from src import features
 from src.model import load_model_and_metadata
-from src.utils import load_shapefile_and_get_points, generate_interactive_map, create_summary_plot, clean_temp_dir
+from src.utils import (load_shapefile_and_get_points, generate_interactive_map,
+                       create_summary_plot, clean_temp_dir,
+                       load_checkpoint, save_checkpoint, clear_checkpoint)
 
 class SandMiningProbabilityMapper:
     def __init__(self, model_path=None, scaler_path=None):
@@ -49,9 +51,23 @@ class SandMiningProbabilityMapper:
         # Determine model and scaler paths
         model_to_use = model_path if model_path else config.DEFAULT_MODEL_FILE
         scaler_to_use = scaler_path if scaler_path else config.DEFAULT_SCALER_FILE
-        
-        # Load model and scaler
-        model, scaler, feature_names = load_model_and_metadata()
+
+        # Load model and scaler.
+        # BUGFIX: this previously ignored model_to_use/scaler_to_use entirely
+        # and always reloaded from config.DEFAULT_MODEL_FILE, so passing
+        # custom model/scaler paths (or already-loaded objects) to the
+        # constructor silently had no effect. It now actually loads from the
+        # resolved paths when they differ from the defaults.
+        if model_to_use == config.DEFAULT_MODEL_FILE and scaler_to_use == config.DEFAULT_SCALER_FILE:
+            model, scaler, feature_names = load_model_and_metadata()
+        else:
+            model, scaler, feature_names = load_model_and_metadata()
+            if model_to_use != config.DEFAULT_MODEL_FILE and os.path.exists(model_to_use):
+                import joblib
+                model = joblib.load(model_to_use)
+            if scaler_to_use != config.DEFAULT_SCALER_FILE and os.path.exists(scaler_to_use):
+                import joblib
+                scaler = joblib.load(scaler_to_use)
         
         if model is None or scaler is None:
             raise Exception("Failed to load model or scaler. Please ensure training completed successfully.")
@@ -412,25 +428,50 @@ class SandMiningProbabilityMapper:
         else:
             print(f"Using imagery baseline date: {latest_date_str} (Source: {source_info})")
         
-        # 3. Analyze each point
-        results = []
+        # 3. Analyze each point (checkpointed — resumable if interrupted)
+        checkpoint_file = getattr(config, 'MAPPING_CHECKPOINT', None)
+        # Key each point by its coordinates so the checkpoint stays valid even
+        # if the shapefile/point-generation order changes slightly between runs.
+        point_keys = [f"{lat:.6f}_{lon:.6f}" for lat, lon in coords]
+
+        ckpt = load_checkpoint(checkpoint_file) if checkpoint_file else {'completed': [], 'results': []}
+        done_keys = set(ckpt.get('completed', []))
+        results = ckpt.get('results', [])
+        remaining = [(lat, lon, key) for (lat, lon), key in zip(coords, point_keys)
+                     if key not in done_keys]
+
+        if done_keys:
+            print(f"[Checkpoint] {len(done_keys)}/{len(coords)} points already mapped; "
+                  f"{len(remaining)} remaining.")
+
         print(f"\nAnalyzing {len(coords)} points along the river...")
-        # Use tqdm for progress bar
-        with tqdm(total=len(coords), desc="Mapping Points", unit="point", smoothing=0.1) as pbar:
-            for lat, lon in coords:
+        processed_since_save = 0
+        with tqdm(total=len(remaining), desc="Mapping Points", unit="point", smoothing=0.1) as pbar:
+            for lat, lon, key in remaining:
                 analysis_result = self.analyze_point(
-                    lat, lon, latest_date_str, 
+                    lat, lon, latest_date_str,
                     use_historical=use_historical,
                     years_back=years_back
                 )
-                
+
                 if analysis_result is not None:
                     results.append(analysis_result)
-                
+
+                done_keys.add(key)
+                processed_since_save += 1
+
+                if checkpoint_file and processed_since_save >= getattr(config, 'CHECKPOINT_EVERY_N', 5):
+                    save_checkpoint(checkpoint_file,
+                                    {'completed': list(done_keys), 'results': results})
+                    processed_since_save = 0
+
                 # Add a small sleep to avoid hitting EE limits too hard
                 time.sleep(0.05)  # 50ms delay
                 pbar.update(1)  # Update progress bar
-        
+
+        if checkpoint_file:
+            save_checkpoint(checkpoint_file, {'completed': list(done_keys), 'results': results})
+
         # 4. Process results and save
         if not results:
             print("\nError: No valid results generated from point analysis.")
@@ -473,7 +514,10 @@ class SandMiningProbabilityMapper:
         
         # Clean up temp folder
         clean_temp_dir()
-        
+
+        if checkpoint_file:
+            clear_checkpoint(checkpoint_file)
+
         return results_df
 
 def run_mapping_workflow(
@@ -503,14 +547,20 @@ def run_mapping_workflow(
         print("❌ Error: Earth Engine could not be initialized. Exiting.")
         return False
     
-    # Load model
+    # Load model (also validated again inside the Mapper constructor, but we
+    # check here first so we can fail fast with a clear message).
     model, scaler, _ = load_model_and_metadata()
     if model is None:
         print("❌ Error: Failed to load model. Cannot proceed with mapping.")
         return False
-    
-    # Create mapper instance
-    mapper = SandMiningProbabilityMapper(model, scaler)
+
+    # Create mapper instance. BUGFIX: this used to pass the *loaded model and
+    # scaler objects* positionally as model_path/scaler_path, which the
+    # constructor's file-loading logic can't use — it silently fell back to
+    # reloading config.DEFAULT_MODEL_FILE/DEFAULT_SCALER_FILE every time.
+    # The constructor loads its own model/scaler from disk, so no arguments
+    # are needed here for the default case.
+    mapper = SandMiningProbabilityMapper()
     
     # Generate points along the river for mapping
     print(f"\nGenerating points along the river with {distance_km} km spacing...")

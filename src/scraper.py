@@ -43,6 +43,7 @@ except ImportError:
     EE_OK = False
 
 from src import config
+from src.utils import load_checkpoint, save_checkpoint
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRAPED_FILE = os.path.join(config.OUTPUT_DIR, 'scraped_mining_locations.csv')
@@ -811,12 +812,37 @@ def scrape_extra_news():
     return results
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Geocoding pass (resumable — disk-backed cache survives interruption)
+# ══════════════════════════════════════════════════════════════════════════════
 
+def geocode_all(records):
+    """
+    Geocode every scraped record that has a place name but no lat/lon yet.
+
+    NOTE: this function was previously called by run_scraper() but its
+    definition had been lost from the file (an orphaned, unindented code
+    block with the same logic was left dangling after scrape_extra_news(),
+    which meant run_scraper() raised NameError on any non-cached run). This
+    restores it as a proper function and adds a disk-backed geocode cache
+    (config.GEOCODE_CACHE_FILE) keyed by place name, so a run interrupted
+    partway through geocoding hundreds of place names resumes instead of
+    re-querying Nominatim (rate-limited to ~1 req/sec) from zero.
+    """
     needs = [r for r in records if not r.get('lat')]
     has   = [r for r in records if r.get('lat')]
-    print(f"\n  Geocoding {len(needs)} text mentions (~{len(needs)} sec)...")
+    print(f"\n  Geocoding {len(needs)} text mentions...")
+
+    cache_file = getattr(config, 'GEOCODE_CACHE_FILE', None)
+    ckpt = load_checkpoint(cache_file) if cache_file else {'completed': [], 'results': []}
+    # Cache is stored as {'completed': [place_keys...], 'results': [[key, lat, lon], ...]}
+    seen = {row[0]: (row[1], row[2]) for row in ckpt.get('results', [])}
+    if seen:
+        print(f"[Checkpoint] {len(seen)} place names already geocoded from cache.")
+
     geocoded = list(has)
-    seen = {}
+    processed_since_save = 0
+
     for i, rec in enumerate(needs):
         place = (rec.get('place') or '').strip()
         if not place:
@@ -828,13 +854,29 @@ def scrape_extra_news():
             lat, lon = geocode(place, river=rec.get('river'),
                                state=rec.get('state'))
             seen[key] = (lat, lon)
+            processed_since_save += 1
             time.sleep(1.1)
+
+            if cache_file and processed_since_save >= getattr(config, 'CHECKPOINT_EVERY_N', 5):
+                save_checkpoint(cache_file, {
+                    'completed': list(seen.keys()),
+                    'results': [[k, v[0], v[1]] for k, v in seen.items()],
+                })
+                processed_since_save = 0
+
         if lat and lon:
             rec['lat'] = round(lat, 6)
             rec['lon'] = round(lon, 6)
             geocoded.append(rec)
         if (i+1) % 20 == 0:
             print(f"    {i+1}/{len(needs)} geocoded ({len(geocoded)} with coords)")
+
+    if cache_file:
+        save_checkpoint(cache_file, {
+            'completed': list(seen.keys()),
+            'results': [[k, v[0], v[1]] for k, v in seen.items()],
+        })
+
     return geocoded
 
 

@@ -23,6 +23,7 @@ import json
 import cv2
 
 from src import config
+from src.utils import load_checkpoint, save_checkpoint, clear_checkpoint
 
 def convert_to_uint8(image_array):
     """
@@ -361,16 +362,20 @@ def extract_region_features(image_path, mask, feature_prefix="region", _img_arr=
         print(f"Error extracting region features ({feature_prefix}): {e}")
         return {}
 
-def extract_enhanced_features(image_path):
+def extract_enhanced_features(image_path, use_dit=None):
     """
     Extract enhanced features from an image, focusing on highlighted areas.
-    
+
     Args:
         image_path (str): Path to image file
-        
+        use_dit (bool, optional): Append frozen pretrained diffusion-transformer
+            deep features (see src.dit_features). Defaults to config.USE_DIT_FEATURES.
+
     Returns:
         dict: Dictionary of all extracted features
     """
+    if use_dit is None:
+        use_dit = getattr(config, 'USE_DIT_FEATURES', False)
     try:
         # Get base filename for annotations
         filename = os.path.basename(image_path)
@@ -438,7 +443,13 @@ def extract_enhanced_features(image_path):
         
         # Combine all features
         all_features = {**global_features, **area_features}
-        
+
+        # Optional: frozen pretrained diffusion-transformer deep features,
+        # concatenated on top of the hand-engineered feature set.
+        if use_dit:
+            from src.dit_features import extract_dit_features
+            all_features.update(extract_dit_features(image_path))
+
         # Handle NaN/inf values
         for key, value in all_features.items():
             if np.isnan(value) or np.isinf(value):
@@ -616,36 +627,63 @@ def extract_advanced_features(image_path):
         print(f"Error extracting advanced features from {os.path.basename(image_path)}: {e}")
         return {}
 
-def extract_features_from_df(image_folder, dataframe):
+def extract_features_from_df(image_folder, dataframe, checkpoint_file=None):
     """
     Extract enhanced features for all images in a dataframe.
-    
+
+    Resumable: progress is saved to `checkpoint_file` after every few images
+    (config.CHECKPOINT_EVERY_N), so an interrupted run (crash, Ctrl-C, EE
+    rate-limit kill) can be restarted and will skip images already processed
+    instead of re-extracting everything from scratch.
+
     Args:
         image_folder (str): Folder containing images
         dataframe (pd.DataFrame): DataFrame with image filenames
-        
+        checkpoint_file (str, optional): Path to a JSON checkpoint file.
+            Defaults to config.FEATURE_EXTRACTION_CHECKPOINT.
+
     Returns:
         pd.DataFrame: DataFrame with extracted features
     """
-    features_list = []
-    
-    for idx, row in tqdm(dataframe.iterrows(), total=len(dataframe), desc="Extracting Enhanced Features"):
-        if 'filename' not in row:
-            continue
-            
+    if checkpoint_file is None:
+        checkpoint_file = config.FEATURE_EXTRACTION_CHECKPOINT
+
+    ckpt = load_checkpoint(checkpoint_file)
+    done_filenames = set(ckpt.get('completed', []))
+    features_list = ckpt.get('results', [])
+
+    rows = [row for _, row in dataframe.iterrows() if 'filename' in row]
+    remaining = [row for row in rows if row['filename'] not in done_filenames]
+    if done_filenames:
+        print(f"[Checkpoint] {len(done_filenames)}/{len(rows)} images already extracted; "
+              f"{len(remaining)} remaining.")
+
+    processed_since_save = 0
+    for row in tqdm(remaining, total=len(remaining), desc="Extracting Enhanced Features"):
         img_path = os.path.join(image_folder, row['filename'])
-        features = extract_enhanced_features(img_path)
-        
-        if features:
-            features['filename'] = row['filename']
+        feats = extract_enhanced_features(img_path)
+
+        if feats:
+            feats['filename'] = row['filename']
             if 'label' in row:
-                features['label'] = row['label']
-            
-            features_list.append(features)
-    
+                feats['label'] = row['label']
+            features_list.append(feats)
+
+        done_filenames.add(row['filename'])
+        processed_since_save += 1
+
+        if processed_since_save >= getattr(config, 'CHECKPOINT_EVERY_N', 5):
+            save_checkpoint(checkpoint_file,
+                            {'completed': list(done_filenames), 'results': features_list})
+            processed_since_save = 0
+
+    save_checkpoint(checkpoint_file,
+                    {'completed': list(done_filenames), 'results': features_list})
+
     if features_list:
         features_df = pd.DataFrame(features_list)
         print(f"Extracted {len(features_df.columns) - 2} features from {len(features_df)} images")
+        clear_checkpoint(checkpoint_file)
         return features_df
     else:
         return pd.DataFrame()
@@ -763,9 +801,9 @@ def calculate_feature_correlation(features_df, output_file=None):
     return high_corr
 
 # Backward compatibility alias
-def extract_all_features(image_path):
+def extract_all_features(image_path, use_dit=None):
     """Alias for extract_enhanced_features"""
-    return extract_enhanced_features(image_path)
+    return extract_enhanced_features(image_path, use_dit=use_dit)
 
 
 def extract_historical_trend_features(lat, lon, years_back=3, buffer_m=1500):
@@ -863,7 +901,7 @@ def parse_lat_lon_from_filename(filename):
     return None, None
 
 
-def extract_features_with_history(image_path, years_back=3, buffer_m=1500):
+def extract_features_with_history(image_path, years_back=3, buffer_m=1500, use_dit=None):
     """
     Full feature extraction combining:
     1. Current image features (spectral, texture, area annotations)
@@ -881,7 +919,7 @@ def extract_features_with_history(image_path, years_back=3, buffer_m=1500):
         dict: Combined feature dictionary
     """
     # Current image features
-    current_features = extract_enhanced_features(image_path)
+    current_features = extract_enhanced_features(image_path, use_dit=use_dit)
 
     # Parse coordinates from filename
     filename = os.path.basename(image_path)
@@ -907,29 +945,45 @@ def extract_features_with_history(image_path, years_back=3, buffer_m=1500):
 
 
 def extract_features_from_df_with_history(image_folder, dataframe,
-                                           years_back=3, buffer_m=1500):
+                                           years_back=3, buffer_m=1500,
+                                           checkpoint_file=None):
     """
     Extract full features (current + historical) for all labeled images.
 
     Use this instead of extract_features_from_df when historical data
-    should be included in training.
+    should be included in training. This is the slowest step in the whole
+    pipeline (one Earth Engine time-series pull per image), so it is
+    checkpointed the same way as extract_features_from_df: progress is saved
+    every config.CHECKPOINT_EVERY_N images and a resumed run skips images
+    already completed.
 
     Args:
         image_folder (str): Folder containing training images
         dataframe (pd.DataFrame): DataFrame with 'filename' and 'label' columns
         years_back (int): Years of historical imagery to use
         buffer_m (int): Buffer radius in metres
+        checkpoint_file (str, optional): Defaults to
+            config.FEATURE_EXTRACTION_CHECKPOINT with a '_history' suffix.
 
     Returns:
         pd.DataFrame: Feature DataFrame with historical trend columns included
     """
-    features_list = []
+    if checkpoint_file is None:
+        base, ext = os.path.splitext(config.FEATURE_EXTRACTION_CHECKPOINT)
+        checkpoint_file = f"{base}_history{ext}"
 
-    for idx, row in tqdm(dataframe.iterrows(), total=len(dataframe),
-                         desc="Extracting Features + History"):
-        if 'filename' not in row:
-            continue
+    ckpt = load_checkpoint(checkpoint_file)
+    done_filenames = set(ckpt.get('completed', []))
+    features_list = ckpt.get('results', [])
 
+    rows = [row for _, row in dataframe.iterrows() if 'filename' in row]
+    remaining = [row for row in rows if row['filename'] not in done_filenames]
+    if done_filenames:
+        print(f"[Checkpoint] {len(done_filenames)}/{len(rows)} images already extracted "
+              f"(with history); {len(remaining)} remaining.")
+
+    processed_since_save = 0
+    for row in tqdm(remaining, total=len(remaining), desc="Extracting Features + History"):
         img_path = os.path.join(image_folder, row['filename'])
         feat = extract_features_with_history(img_path, years_back=years_back,
                                               buffer_m=buffer_m)
@@ -940,11 +994,23 @@ def extract_features_from_df_with_history(image_folder, dataframe,
                 feat['label'] = row['label']
             features_list.append(feat)
 
+        done_filenames.add(row['filename'])
+        processed_since_save += 1
+
+        if processed_since_save >= getattr(config, 'CHECKPOINT_EVERY_N', 5):
+            save_checkpoint(checkpoint_file,
+                            {'completed': list(done_filenames), 'results': features_list})
+            processed_since_save = 0
+
+    save_checkpoint(checkpoint_file,
+                    {'completed': list(done_filenames), 'results': features_list})
+
     if features_list:
         features_df = pd.DataFrame(features_list)
         n_feat = len(features_df.columns) - 2
         print(f"Extracted {n_feat} features (incl. historical trends) "
               f"from {len(features_df)} images")
+        clear_checkpoint(checkpoint_file)
         return features_df
     else:
         return pd.DataFrame()

@@ -17,10 +17,14 @@ sys.path.insert(0, parent_dir)
 from src import config
 from src import ee_utils
 from src.utils import ensure_directories, clean_temp_dir
-from src.gui import start_labeling_gui
+# NOTE: src.gui imports tkinter at module level, which is unavailable on
+# headless systems (servers, containers, CI). It is therefore imported lazily
+# inside run_enhanced_labeling() rather than here, so that non-GUI modes
+# (map, analyze-image, retrain, full, all-river) work in headless environments.
 from src.model import run_training_workflow, load_model_and_metadata, run_all_river_training
 from src.mapper import run_mapping_workflow
 from src.mapper import SandMiningProbabilityMapper  # keep only this
+from src.single_image_analysis import analyze_image
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -30,14 +34,37 @@ def parse_arguments():
     )
     parser.add_argument(
         '--mode', type=str, required=True,
-        choices=['train', 'map', 'both', 'label', 'full', 'all-river'],
+        choices=['train', 'retrain', 'map', 'both', 'label', 'full', 'all-river', 'analyze-image'],
         help="Operating mode:\n"
-             "  train     - Download images, label them, and train a per-river model.\n"
-             "  map       - Create a probability map using an existing model.\n"
-             "  both      - Run training first, then create a map.\n"
-             "  label     - Only run the image labeling and area annotation interface.\n"
-             "  full      - Three-layer fusion pipeline.\n"
-             "  all-river - Train a SEPARATE global model pooling every river's data."
+             "  train         - Download images, label them, and train a per-river model.\n"
+             "  retrain       - Train on the labels you ALREADY have, without\n"
+             "                  re-downloading imagery or re-opening the labeling GUI.\n"
+             "  map           - Create a probability map using an existing model.\n"
+             "  both          - Run training first, then create a map.\n"
+             "  label         - Only run the image labeling and area annotation interface.\n"
+             "  full          - Three-layer fusion pipeline.\n"
+             "  all-river     - Train a SEPARATE global model pooling every river's data.\n"
+             "  analyze-image - Score a single arbitrary image (--image) and mark\n"
+             "                  suspected sand mining areas with a heatmap overlay."
+    )
+    parser.add_argument(
+        '--image', type=str, required=False,
+        help='Path to a single image for mode=analyze-image.'
+    )
+    parser.add_argument(
+        '--no-annotation-features', action='store_true',
+        help='Exclude features derived from hand-drawn annotations when training.\n'
+             'The labeling GUI auto-sets label=1 when you draw a sand_mining\n'
+             'region, so those features partly encode the label itself and\n'
+             'inflate accuracy (target leakage). Use this flag to train an\n'
+             'imagery-only model whose scores are a valid estimate of\n'
+             'performance on unlabeled imagery — report THESE numbers.'
+    )
+    parser.add_argument(
+        '--use-dit', action='store_true',
+        help='Use frozen pretrained diffusion-transformer deep features '
+             '(requires: pip install torch diffusers) alongside the '
+             'existing spectral/texture features, for train/map/analyze-image modes.'
     )
     parser.add_argument(
         '--shapefile', type=str, required=False,
@@ -109,8 +136,10 @@ def parse_arguments():
     args = parser.parse_args()
 
     # Validate required arguments based on mode
-    if args.mode in ['train', 'map', 'both'] and not args.shapefile:
+    if args.mode in ['train', 'retrain', 'map', 'both'] and not args.shapefile:
         parser.error(f"--shapefile is required for mode '{args.mode}'")
+    if args.mode == 'analyze-image' and not args.image:
+        parser.error("--image is required for mode 'analyze-image'")
     return args
 
 
@@ -197,7 +226,16 @@ def run_enhanced_labeling():
     print("\n⚠️  Important: Label at least 10+ images and highlight key areas for best results")
     print("="*80)
 
-    # Launch the enhanced GUI
+    # Launch the enhanced GUI (imported lazily — see note at top of file)
+    try:
+        from src.gui import start_labeling_gui
+    except ImportError as gui_err:
+        print(f"\n❌ Cannot start the labeling GUI: {gui_err}")
+        print("   The GUI requires tkinter and a display. On headless systems, "
+              "label images on a desktop machine, or use --mode retrain to train "
+              "on labels you already have.")
+        return False
+
     start_labeling_gui()
 
     # Check if we have sufficient labels and annotations
@@ -259,6 +297,18 @@ def main():
     # Parse command line arguments
     args = parse_arguments()
 
+    if args.use_dit:
+        config.USE_DIT_FEATURES = True
+        print("\n🧠 Diffusion-transformer deep features ENABLED "
+              "(frozen pretrained backbone, feature-extraction only).")
+
+    if args.mode == 'analyze-image':
+        print("\n" + "="*80)
+        print(" SINGLE-IMAGE SAND MINING ANALYSIS")
+        print("="*80 + "\n")
+        result = analyze_image(args.image, use_dit=args.use_dit)
+        sys.exit(0 if result is not None else 1)
+
     # ── Per-river isolated paths ──────────────────────────────────────────────
     # Each river gets its own training_images/, labels, and annotations
     # so nothing ever mixes between rivers.
@@ -293,13 +343,66 @@ def main():
         run_enhanced_labeling()
         return
 
+    if args.mode == 'retrain':
+        # Train on labels that already exist on disk — no re-downloading of
+        # imagery and no labeling GUI. Use this after you have labeled images
+        # once (or after editing labels/annotations) to rebuild the model.
+        from src.utils import load_labels
+        labels = load_labels()
+        labeled_count = sum(1 for v in labels.values() if v != -1)
+
+        if labeled_count == 0:
+            print(f"❌ No labeled images found in {config.LABELS_FILE}")
+            print("   Run --mode label (or --mode train) to label images first.")
+            sys.exit(1)
+
+        print("\n" + "="*80)
+        print(f" RETRAINING ON {labeled_count} EXISTING LABELED IMAGES")
+        print("="*80 + "\n")
+
+        # BUGFIX: historical trend features (NDVI_trend etc.) require Earth
+        # Engine. Without this init every get_historical_images() call failed
+        # with "Earth Engine client library not initialized" and all trend
+        # features were silently written as zeros.
+        if getattr(config, 'HISTORICAL_YEARS_BACK', 0) > 0:
+            if not ee_utils.initialize_ee():
+                print("⚠️  Earth Engine init failed — historical trend features "
+                      "will be zero. Training will continue on image features only.")
+        print(f"   Images → {config.TRAINING_IMAGES_DIR}")
+        print(f"   Labels → {config.LABELS_FILE}\n")
+
+        training_success = run_training_workflow(
+            use_grid_search=args.use_grid_search,
+            model_type=args.model_type,
+            use_multiple_models=args.multiple_models,
+            exclude_annotation_features=args.no_annotation_features
+        )
+
+        if training_success and args.shapefile:
+            import shutil
+            river_name = os.path.splitext(os.path.basename(args.shapefile))[0]
+            river_model_dir = os.path.join(config.MODELS_DIR, river_name)
+            os.makedirs(river_model_dir, exist_ok=True)
+            for fname in [
+                'sand_mining_model.joblib', 'feature_scaler.joblib',
+                'feature_names.json', 'feature_importance.json',
+                'model_comparison_results.csv',
+            ]:
+                src_path = os.path.join(config.MODELS_DIR, fname)
+                if os.path.exists(src_path):
+                    shutil.copy2(src_path, os.path.join(river_model_dir, fname))
+            print(f"\n✅ River model also saved to: {river_model_dir}")
+
+        sys.exit(0 if training_success else 1)
+
     if args.mode == 'all-river':
         # Train a separate global model across every river that has labels.
         ok = run_all_river_training(
             use_grid_search=args.use_grid_search,
             model_type=args.model_type,
             use_multiple_models=args.multiple_models or True,
-            years_back=args.years_back
+            years_back=args.years_back,
+            exclude_annotation_features=args.no_annotation_features
         )
         sys.exit(0 if ok else 1)
 
@@ -326,7 +429,8 @@ def main():
         training_success = run_training_workflow(
             use_grid_search=args.use_grid_search,
             model_type=args.model_type,
-            use_multiple_models=args.multiple_models
+            use_multiple_models=args.multiple_models,
+            exclude_annotation_features=args.no_annotation_features
         )
 
         if not training_success and args.mode == 'both':
@@ -399,8 +503,7 @@ def main():
         print(" FULL THREE-LAYER FUSION PIPELINE")
         print("="*80 + "\n")
 
-        # Initialize EE
-        from src import ee_utils
+        # Initialize EE (already imported at module level)
         if not ee_utils.initialize_ee():
             print("❌ Earth Engine init failed.")
             sys.exit(1)

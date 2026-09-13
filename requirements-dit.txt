@@ -1,0 +1,5 @@
+# Optional: only needed if you enable --use-dit / config.USE_DIT_FEATURES
+# (frozen pretrained diffusion-transformer deep features).
+torch>=2.1
+diffusers>=0.27
+accelerate>=0.28

@@ -15,6 +15,7 @@ import io
 import os
 
 from src import config
+from src.utils import load_checkpoint, save_checkpoint, clear_checkpoint
 
 def initialize_ee():
     """
@@ -23,9 +24,16 @@ def initialize_ee():
     Returns:
         bool: True if initialization was successful, False otherwise.
     """
-    # Configuration - REPLACE WITH YOUR PROJECT INFO
-    YOUR_PROJECT_ID = "ed-sayandasgupta97"
-    EE_HIGHVOLUME_URL = 'https://earthengine-highvolume.googleapis.com'
+    # Google Cloud project used for Earth Engine API calls. Set this via the
+    # EE_PROJECT_ID environment variable (or edit config.EE_PROJECT_ID) rather
+    # than hardcoding a personal project ID here, so the tool is installable
+    # and runnable by anyone with their own Earth Engine-enabled GCP project.
+    YOUR_PROJECT_ID = getattr(config, 'EE_PROJECT_ID', None) or os.environ.get('EE_PROJECT_ID')
+    if not YOUR_PROJECT_ID:
+        print("Error: No Earth Engine project configured. Set the EE_PROJECT_ID "
+              "environment variable, e.g.:\n  export EE_PROJECT_ID=your-gcp-project-id")
+        return False
+    EE_HIGHVOLUME_URL = config.EE_HIGH_VOLUME_URL
     
     # First check if already initialized
     if ee.data._credentials:  # pylint: disable=protected-access
@@ -67,7 +75,7 @@ def initialize_ee():
         print("   c. Added 'Service Usage Consumer' role to your account")
         print("2. Run these commands:")
         print("   gcloud auth application-default login")
-        print("   gcloud config set project ed-sayandasgupta97")
+        print(f"   gcloud config set project {YOUR_PROJECT_ID}")
         
         # Final fallback
         try:
@@ -82,8 +90,8 @@ def initialize_ee():
         except Exception as final_e:
             print(f"Final initialization failed: {final_e}")
             print("\nTROUBLESHOOTING:")
-            print("- Verify project ID 'ed-sayandasgupta97' exists in Google Cloud")
-            print("- Check IAM permissions: https://console.cloud.google.com/iam-admin/iam?project=ed-sayandasgupta97")
+            print(f"- Verify project ID '{YOUR_PROJECT_ID}' exists in Google Cloud")
+            print(f"- Check IAM permissions: https://console.cloud.google.com/iam-admin/iam?project={YOUR_PROJECT_ID}")
             print("- Ensure Earth Engine API is enabled")
             return False
 
@@ -602,22 +610,58 @@ def download_training_images(coordinates, output_folder, img_dim=512, buffer_m=1
     print(f"\nDownloading {len(coordinates)} images for training/labeling...")
     print(f"Image dimensions: {img_dim}x{img_dim}, Buffer: {buffer_m}m")
 
-    success_count = 0
+    # Resumable: key each point by its coordinates (matches the filename
+    # pattern train_image_N_LAT_LON.png) so a killed/interrupted download run
+    # can restart and skip points it already fetched, instead of re-downloading
+    # (and re-burning Earth Engine quota for) everything from scratch.
+    checkpoint_file = getattr(config, 'DOWNLOAD_CHECKPOINT', None)
+    ckpt = load_checkpoint(checkpoint_file) if checkpoint_file else {'completed': [], 'results': []}
+    done_keys = set(ckpt.get('completed', []))
 
-    with tqdm(total=len(coordinates), desc="Downloading Images", unit="image") as pbar:
-        for i, (lat, lon) in enumerate(coordinates):
+    point_keys = [f"{lat:.6f}_{lon:.6f}" for lat, lon in coordinates]
+    # Also treat a point as done if its output file already exists on disk
+    # (covers the case where the checkpoint itself was lost but files weren't).
+    for i, (lat, lon) in enumerate(coordinates):
+        fname = f'train_image_{i+1}_{lat:.6f}_{lon:.6f}.png'
+        if os.path.exists(os.path.join(output_folder, fname)):
+            done_keys.add(point_keys[i])
+
+    remaining = [(i, lat, lon) for i, (lat, lon) in enumerate(coordinates)
+                 if point_keys[i] not in done_keys]
+    if done_keys:
+        print(f"[Checkpoint] {len(done_keys)}/{len(coordinates)} images already downloaded; "
+              f"{len(remaining)} remaining.")
+
+    success_count = len(done_keys)
+    processed_since_save = 0
+
+    with tqdm(total=len(remaining), desc="Downloading Images", unit="image") as pbar:
+        for i, lat, lon in remaining:
             point_start_time = time.time()
-            
+
             success = download_training_image(lat, lon, i, output_folder, buffer_m, img_dim)
             if success:
                 success_count += 1
-            
+
+            done_keys.add(point_keys[i])
+            processed_since_save += 1
+
+            if checkpoint_file and processed_since_save >= getattr(config, 'CHECKPOINT_EVERY_N', 5):
+                save_checkpoint(checkpoint_file, {'completed': list(done_keys), 'results': []})
+                processed_since_save = 0
+
             # Dynamically adjust sleep based on request time
             elapsed_time = time.time() - point_start_time
             sleep_time = max(0, 1.2 - elapsed_time)  # Aim slightly slower than 1 req/sec
             time.sleep(sleep_time)
-            
+
             pbar.update(1)  # Update progress bar
+
+    if checkpoint_file:
+        if success_count > 0:
+            clear_checkpoint(checkpoint_file)
+        else:
+            save_checkpoint(checkpoint_file, {'completed': list(done_keys), 'results': []})
 
     print(f"\nSuccessfully downloaded {success_count} out of {len(coordinates)} images.")
     return success_count > 0  # Return True if any images were successfully downloaded

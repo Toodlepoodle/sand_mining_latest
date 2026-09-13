@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Runtime outputs (generated, not source)
+outputs/
+data/raw/
+data/processed/
+
+# Local environment
+.env
+venv/
+.venv/
+
+# OS
+.DS_Store

@@ -46,6 +46,10 @@ SEASONAL_STATS_FILE = os.path.join(SEASONAL_DIR, 'seasonal_statistics.csv')
 
 # Earth Engine settings
 EE_HIGH_VOLUME_URL = 'https://earthengine-highvolume.googleapis.com'
+# Google Cloud project ID for Earth Engine calls. Leave as None to require
+# the EE_PROJECT_ID environment variable instead of hardcoding a project here
+# (keeps personal/institutional project IDs out of version control).
+EE_PROJECT_ID = os.environ.get('EE_PROJECT_ID', None)
 
 # Image parameters
 DEFAULT_IMAGE_DIM = 1024
@@ -154,6 +158,36 @@ MAX_PERIODS_PER_LOCATION = 40
 SAVE_HISTORICAL_IMAGES = False
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── Checkpointing (resumable long-running steps) ──────────────────────────────
+CHECKPOINT_DIR = os.path.join(OUTPUT_DIR, 'checkpoints')
+FEATURE_EXTRACTION_CHECKPOINT = os.path.join(CHECKPOINT_DIR, 'feature_extraction_checkpoint.json')
+MAPPING_CHECKPOINT = os.path.join(CHECKPOINT_DIR, 'mapping_checkpoint.json')
+DOWNLOAD_CHECKPOINT = os.path.join(CHECKPOINT_DIR, 'download_checkpoint.json')
+GEOCODE_CACHE_FILE = os.path.join(CHECKPOINT_DIR, 'geocode_cache.json')
+# Save a checkpoint every N items processed (lower = safer, more disk I/O)
+CHECKPOINT_EVERY_N = 5
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Single-image analysis (mark suspected areas + score) ─────────────────────
+SINGLE_IMAGE_OUTPUT_DIR = os.path.join(OUTPUT_DIR, 'single_image_analysis')
+# Number of SLIC superpixel segments used to tile an arbitrary input image
+SLIC_N_SEGMENTS = 60
+SLIC_COMPACTNESS = 12
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Diffusion Transformer (DiT) deep features ─────────────────────────────────
+# Frozen, pretrained diffusion-model backbone used purely as a feature
+# extractor: its intermediate representations are pooled and concatenated
+# onto the existing spectral/texture/GLCM feature vector before the
+# RF/XGBoost/LightGBM classifiers see it. No diffusion model is trained here.
+USE_DIT_FEATURES = False   # opt-in: requires torch + diffusers installed
+DIT_MODEL_ID = 'facebook/DiT-XL-2-256'
+DIT_IMAGE_SIZE = 256
+DIT_TIMESTEP = 100          # noise level at which features are extracted (0-999)
+DIT_FEATURE_DIM = 64        # pooled feature vector length appended per image
+DIT_DEVICE = 'cuda'         # falls back to 'cpu' automatically if no GPU
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Model files for different algorithms
 RF_MODEL_FILE   = os.path.join(MODELS_DIR, 'random_forest_model.pkl')
 GB_MODEL_FILE   = os.path.join(MODELS_DIR, 'gradient_boosting_model.pkl')
@@ -173,5 +207,6 @@ for directory in [
     # Historical directories
     HISTORICAL_DIR, TIME_SERIES_DIR, CHANGE_MAPS_DIR,
     TEMPORAL_IMAGES_DIR, SSC_MAPS_DIR, SEASONAL_DIR,
+    CHECKPOINT_DIR, SINGLE_IMAGE_OUTPUT_DIR,
 ]:
     os.makedirs(directory, exist_ok=True)
