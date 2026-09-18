@@ -84,6 +84,27 @@ class LabelingGUI:
         )
         self.progress_label.pack(side='left', padx=15)
 
+        # Copy-pasteable coordinates for cross-checking in Google Earth Pro.
+        # Read-only but selectable, so Ctrl+C works as well as the button.
+        tk.Label(
+            top, text="Lat, Lon:", font=("Arial", 11),
+            bg='#1e1e1e', fg='#aaaaaa'
+        ).pack(side='left', padx=(10, 3))
+
+        self.coord_var = tk.StringVar(value="")
+        self.coord_entry = tk.Entry(
+            top, textvariable=self.coord_var, font=("Consolas", 11),
+            width=24, relief='flat', bg='#2b2b2b', fg='#00d4aa',
+            readonlybackground='#2b2b2b', state='readonly',
+            justify='center',
+        )
+        self.coord_entry.pack(side='left', padx=2)
+
+        tk.Button(
+            top, text="Copy (g)", command=self.copy_coords,
+            bg='#333', fg='white', relief='flat', padx=8
+        ).pack(side='left', padx=4)
+
         self.mode_label = tk.Label(
             top, text="✏️  DRAW MODE ON",
             font=("Arial", 12, 'bold'), bg='#1e1e1e', fg='#00d4aa'
@@ -191,6 +212,7 @@ class LabelingGUI:
         self.root.bind('<Escape>', lambda e: self.save_and_exit())
         self.root.bind('h',        lambda e: self.show_help())
         self.root.bind('c',        lambda e: self.clear_annotations())
+        self.root.bind('g',        lambda e: self.copy_coords())
 
     # ── Annotation persistence ─────────────────────────────────────────────
 
@@ -430,6 +452,32 @@ class LabelingGUI:
             self.current_index -= 1
             self.load_image()
 
+    @staticmethod
+    def _parse_lat_lon(filename):
+        """Pull (lat, lon) out of 'train_image_N_LAT_LON.png'.
+
+        Kept local to the GUI rather than imported from src.features so that
+        opening the labeller does not drag in scikit-image and friends.
+        """
+        try:
+            parts = os.path.splitext(filename)[0].split('_')
+            lat, lon = float(parts[-2]), float(parts[-1])
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return lat, lon
+        except (ValueError, IndexError):
+            pass
+        return None, None
+
+    def copy_coords(self, event=None):
+        """Put the current image's coordinates on the clipboard."""
+        coords = self.coord_var.get()
+        if not coords or coords == "unknown":
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(coords)
+        self.root.update()  # keep the clipboard alive after the window closes
+        self.status_label.config(text=f"Copied to clipboard: {coords}")
+
     def update_status(self):
         if not self.image_files:
             return
@@ -441,6 +489,11 @@ class LabelingGUI:
 
         label_text  = {0: "✅ No Mining", 1: "⛏️  Sand Mining", -1: "— Unlabeled"}[label]
         label_color = {0: '#44cc44',      1: '#ff4444',        -1: '#888888'}[label]
+
+        lat, lon = self._parse_lat_lon(img_file)
+        self.coord_var.set(
+            f"{lat:.6f}, {lon:.6f}" if lat is not None else "unknown"
+        )
 
         short = img_file if len(img_file) < 50 else img_file[:25] + '...' + img_file[-20:]
         self.progress_label.config(
