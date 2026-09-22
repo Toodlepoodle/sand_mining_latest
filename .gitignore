@@ -20,3 +20,7 @@ venv/
 
 # OS
 .DS_Store
+
+outputs/training_images/
+outputs/checkpoints/
+outputs/temp/
